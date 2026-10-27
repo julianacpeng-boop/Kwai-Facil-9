@@ -1,6 +1,0 @@
-plugins { id 'com.android.application' }
-android { namespace 'br.com.juh.kwaifacil'; compileSdk 35
- defaultConfig { applicationId 'br.com.juh.kwaifacil'; minSdk 26; targetSdk 34; versionCode 11; versionName '1.1-verificacao-automatica' }
- buildTypes { debug { } }
- compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
-}
