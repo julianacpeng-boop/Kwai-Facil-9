@@ -119,6 +119,14 @@ public class KwaiService extends AccessibilityService {
    verificationAttempts++;verificationStartedAt=now;verificationStage=1;
    verificationActionAt=0;profileScrolled=false;verificationMatched=false;verificationFailure="";
   }
+  // Video recognition always wins over stale profile nodes and navigation stages.
+  // Opening a thumbnail is asynchronous: the next tick may already be in the player.
+  if(verificationStage>=1&&verificationStage<=3&&
+     (videoNode(nodes,"slide_play_tv_user_info_desc")!=null||
+      videoNode(nodes,"slide_play_tv_user_info_desc_more_hide")!=null)){
+   verificationStage=4;verificationActionAt=now;
+   Run.status="Vídeo reconhecido. Localizando Mais pelo identificador…";return;
+  }
   // Timeouts also leave the video through its top arrow before any next action.
   if(verificationStage<6&&now-verificationStartedAt>30000){
    verificationFailure="Não consegui expandir e ler a legenda completa.";
@@ -153,10 +161,8 @@ public class KwaiService extends AccessibilityService {
    performGlobalAction(GLOBAL_ACTION_BACK);verificationActionAt=now;return;
   }
   if(verificationStage==2){
-   if(!isProfileScreen(nodes)){verificationStage=1;return;}
-   android.graphics.Rect r=new android.graphics.Rect();root.getBoundsInScreen(r);
-   navigationGesture(r.centerX(),r.top+r.height()*0.82f,r.centerX(),r.top+r.height()*0.40f,450);
-   verificationStage=3;verificationActionAt=now;profileScrolled=true;return;
+   // No upward swipe is allowed during verification, even when the grid is missing.
+   verificationStage=3;verificationActionAt=now;return;
   }
   if(verificationStage==3){
    if(!isProfileScreen(nodes)){verificationStage=1;return;}
@@ -164,7 +170,7 @@ public class KwaiService extends AccessibilityService {
    if(latest!=null&&verificationClick(latest)||latest==null&&tapFirstPost(root,nodes)){
     verificationStage=4;verificationActionAt=now;return;
    }
-   if(!profileScrolled){verificationStage=2;verificationActionAt=now;return;}
+
    Run.status="Aguardando identificar o primeiro vídeo da grade…";return;
   }
   if(verificationStage==4||verificationStage==5){
@@ -216,7 +222,7 @@ public class KwaiService extends AccessibilityService {
  void startReadingTest(String target){
   readingTest=true;Run.target=target;Run.active=true;lastReadCaption="";
   resetVerification();verificationStage=1;verificationAttempts=1;
-  verificationStartedAt=SystemClock.uptimeMillis();Run.status="Teste: abrindo Perfil → vídeo mais recente → Mais…";
+  verificationStartedAt=SystemClock.uptimeMillis();Run.status="Simulação sem rolagem: Perfil → vídeo mais recente → Mais…";
  }
  void endReadingTest(String result){readingTest=false;Run.active=false;Run.status=result;QueueStore.notice=result;
   Toast.makeText(this,result,Toast.LENGTH_LONG).show();
@@ -279,6 +285,10 @@ public class KwaiService extends AccessibilityService {
   navigationGesture(r.left+r.width()*x,r.top+r.height()*y,r.left+r.width()*x,r.top+r.height()*y,80);
  }
  boolean navigationGesture(float x,float y,float ex,float ey,long duration){
+  // Verification may tap but must never drag the player to another video.
+  if((readingTest||Run.sent)&&(Math.abs(x-ex)>1f||Math.abs(y-ey)>1f)){
+   Run.status="Rolagem bloqueada durante a conferência da legenda.";return false;
+  }
   android.graphics.Path p=new android.graphics.Path();p.moveTo(x,y);if(x!=ex||y!=ey)p.lineTo(ex,ey);
   return dispatchGesture(new android.accessibilityservice.GestureDescription.Builder().addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(p,0,duration)).build(),null,null);
  }
