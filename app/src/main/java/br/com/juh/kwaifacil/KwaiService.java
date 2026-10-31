@@ -136,16 +136,7 @@ public class KwaiService extends AccessibilityService {
    boolean matches=publishedCaptionMatches(nodes);
    if(!expanded&&!matches&&verificationStage==4){
     // Some Kwai versions draw Mais without exposing a separate accessibility node.
-    android.graphics.Rect w=new android.graphics.Rect();root.getBoundsInScreen(w);
-    float y=w.top+w.height()*0.81f;
-    for(AccessibilityNodeInfo n:nodes){if(!n.isVisibleToUser())continue;
-     if(label(n).matches("[0-9]{4}-[0-9]{2}-[0-9]{2}.*")){
-      android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);
-      if(b.top>w.top+w.height()*0.65)y=b.top-w.height()*0.025f;
-     }
-    }
-    float x=w.left+w.width()*0.75f;
-    navigationGesture(x,y,x,y,80);verificationStage=5;verificationActionAt=now;
+    tapRecordedCaptionMore(root,nodes);verificationStage=5;verificationActionAt=now;
     Run.status="Tocando na posição de Mais da gravação; aguardando expandir…";return;
    }
    if(!expanded&&!matches){Run.status="Aguardando confirmar a legenda inteira; ainda não li o texto.";return;}
@@ -168,11 +159,28 @@ public class KwaiService extends AccessibilityService {
   }return best;
  }
  boolean tapCaptionMore(AccessibilityNodeInfo n,AccessibilityNodeInfo root){
+  String t=label(n);
   android.graphics.Rect r=new android.graphics.Rect();n.getBoundsInScreen(r);
-  // Tap the end of the caption line itself, never its clickable video ancestor.
-  String t=label(n);float x=r.centerX(),y=r.centerY();
-  if(t.length()>12){x=r.right-Math.min(r.width()*0.10f,24);y=r.bottom-Math.min(r.height()*0.25f,18);}
-  return navigationGesture(x,y,x,y,80);
+  if(t.equals("mais")||t.equals("ver mais")||t.equals("more")||t.equals("see more")){
+   // Only this exact button may receive ACTION_CLICK: never climb to the video.
+   if(n.isClickable()&&n.performAction(AccessibilityNodeInfo.ACTION_CLICK))return true;
+   if(!r.isEmpty())return navigationGesture(r.centerX(),r.centerY(),r.centerX(),r.centerY(),90);
+  }
+  List<AccessibilityNodeInfo> nodes=new ArrayList<>();collect(root,nodes);
+  return tapRecordedCaptionMore(root,nodes);
+ }
+ boolean tapRecordedCaptionMore(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes){
+  android.util.DisplayMetrics d=new android.util.DisplayMetrics();
+  ((android.view.WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(d);
+  // Measured center of Mais in the supplied 610 x 1356 screenshot: (454,1095).
+  // Physical screen coordinates avoid offsets from Android status/navigation bars.
+  float x=d.widthPixels*(454f/610f),y=d.heightPixels*(1095f/1356f);
+  for(AccessibilityNodeInfo n:nodes){
+   if(!n.isVisibleToUser()||!label(n).matches("[0-9]{4}-[0-9]{2}-[0-9]{2}.*"))continue;
+   android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);
+   if(b.top>d.heightPixels*0.70f&&b.top<d.heightPixels*0.90f){y=b.centerY()-d.heightPixels*(39f/1356f);break;}
+  }
+  return navigationGesture(x,y,x,y,90);
  }
  void clickVideoBack(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes){
   android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);
@@ -277,7 +285,7 @@ public class KwaiService extends AccessibilityService {
  }
  boolean uploadInProgressFromRoot(){AccessibilityNodeInfo root=getRootInActiveWindow();if(root==null||!Run.target.contentEquals(root.getPackageName()))return false;List<AccessibilityNodeInfo> nodes=new ArrayList<>();collect(root,nodes);return uploadInProgress(nodes);}
  boolean uploadInProgress(List<AccessibilityNodeInfo> nodes){for(AccessibilityNodeInfo n:nodes){String s=normalizeStatus(label(n));if(s.contains("enviando")||s.contains("publicando")||s.contains("processando")||s.contains("uploading")||s.contains("subindo video"))return true;}return false;}
- boolean isProfileScreen(List<AccessibilityNodeInfo> nodes){boolean edit=false,posts=false,followers=false;for(AccessibilityNodeInfo n:nodes){String s=normalizeStatus(label(n));if(s.contains("editar perfil")||s.equals("edit profile"))edit=true;if(s.equals("publicacoes")||s.equals("videos")||s.equals("posts"))posts=true;if(s.contains("seguidores")||s.contains("followers"))followers=true;}if(edit||(posts&&followers))return true;
+ boolean isProfileScreen(List<AccessibilityNodeInfo> nodes){boolean edit=false,posts=false,followers=false;if(publishedVideoScreen(nodes))return false;for(AccessibilityNodeInfo n:nodes){if(!n.isVisibleToUser())continue;String s=normalizeStatus(label(n));if(s.contains("editar perfil")||s.equals("edit profile"))edit=true;if(s.equals("publicacoes")||s.equals("videos")||s.equals("posts"))posts=true;if(s.contains("seguidores")||s.contains("followers"))followers=true;}if(edit||(posts&&followers))return true;
  for(AccessibilityNodeInfo n:nodes)if(n.isVisibleToUser()&&n.isSelected()&&(label(n).equals("perfil")||label(n).equals("profile")))return true;
  return false;}
  AccessibilityNodeInfo profileButton(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);for(AccessibilityNodeInfo n:nodes){String s=normalizeStatus(label(n));if(!n.isVisibleToUser()||!n.isEnabled()||!(s.equals("perfil")||s.equals("profile")||s.equals("eu")||s.equals("me")))continue;android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);if(b.centerY()>=win.top+win.height()*0.70)return n;}return null;}
