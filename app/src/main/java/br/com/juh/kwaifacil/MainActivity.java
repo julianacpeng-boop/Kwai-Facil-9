@@ -160,6 +160,8 @@ public class MainActivity extends Activity {
         addButton(card, "Iniciar / continuar fila", MINT, Color.WHITE, true, () -> begin());
         addButton(card, "Pausar / parar", 0xFFFFF1E7, ORANGE_DARK, false, () -> QueueStore.pause("Fila pausada. Revise o item em andamento antes de continuar."));
 
+        addButton(card, "Testar leitura do último vídeo", ORANGE, Color.WHITE, true, () -> testLastVideo());
+
         status = label("Pronto para organizar sua fila.", 14, INK, false);
         status.setPadding(dp(13), dp(11), dp(13), dp(11));
         status.setBackground(background(0xFFFFF8EF, LINE, 12));
@@ -242,6 +244,30 @@ public class MainActivity extends Activity {
                 .setNegativeButton("Cancelar", null).show());
         }
         d.show();
+    }
+
+    void testLastVideo() {
+        if (QueueStore.running || Run.active) { toast("Pause a fila antes do teste."); return; }
+        if (KwaiService.instance == null) { toast("Ative a acessibilidade primeiro."); return; }
+        ArrayList<String> packages = new ArrayList<>();
+        ArrayList<String> names = new ArrayList<>();
+        Intent probe = new Intent(Intent.ACTION_SEND).setType("video/*");
+        for (ResolveInfo r : getPackageManager().queryIntentActivities(probe, PackageManager.MATCH_ALL)) {
+            String pkg = r.activityInfo.packageName;
+            if ((pkg.equals("com.kwai.video") || pkg.equals("com.smile.gifmaker")) && !packages.contains(pkg)) {
+                packages.add(pkg); names.add(r.loadLabel(getPackageManager()).toString());
+            }
+        }
+        if (packages.isEmpty()) { toast("Kwai não encontrado."); return; }
+        new AlertDialog.Builder(this).setTitle("Testar leitura no Kwai")
+            .setItems(names.toArray(new String[0]), (d,i) -> {
+                String pkg = packages.get(i);
+                Intent launch = getPackageManager().getLaunchIntentForPackage(pkg);
+                if (launch == null) return;
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                KwaiService.instance.startReadingTest(pkg);
+                startActivity(launch);
+            }).setNegativeButton("Cancelar", null).show();
     }
 
     void begin() {
