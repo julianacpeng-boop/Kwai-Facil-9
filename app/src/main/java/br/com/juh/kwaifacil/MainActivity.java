@@ -160,7 +160,12 @@ public class MainActivity extends Activity {
         addButton(card, "Iniciar / continuar fila", MINT, Color.WHITE, true, () -> begin());
         addButton(card, "Pausar / parar", 0xFFFFF1E7, ORANGE_DARK, false, () -> QueueStore.pause("Fila pausada. Revise o item em andamento antes de continuar."));
 
-        addButton(card, "Testar leitura do último vídeo", ORANGE, Color.WHITE, true, () -> testLastVideo());
+        TextView simulate = label("Simular leitura de legenda", 12, MUTED, false);
+        simulate.setGravity(Gravity.END);
+        simulate.setPadding(dp(8), dp(12), dp(8), dp(12));
+        simulate.setOnClickListener(v -> testLastVideo());
+        simulate.setContentDescription("Simular leitura do vídeo mais recente, sem publicar");
+        card.addView(simulate, new LinearLayout.LayoutParams(-1, -2));
 
         status = label("Pronto para organizar sua fila.", 14, INK, false);
         status.setPadding(dp(13), dp(11), dp(13), dp(11));

@@ -1,7 +1,7 @@
 package br.com.juh.kwaifacil;
 import android.accessibilityservice.AccessibilityService; import android.view.accessibility.*; import android.os.*; import android.widget.Toast; import java.util.*;
 public class KwaiService extends AccessibilityService {
- static KwaiService instance; Handler h=new Handler(Looper.getMainLooper()); long captionMismatchSince=0; boolean hashtagRetry=false; int hashtagRetries=0; long warningUntil=0; long last=0; String lastScreen=""; int verificationAttempts=0,lastProfileCheckAttempt=0; long finalVerificationUntil=0; long verificationSentAt=-1,verificationActionAt=0,verificationStartedAt=0; int verificationStage=0; boolean profileScrolled=false; boolean readingTest=false; String lastReadCaption="";
+ static KwaiService instance; Handler h=new Handler(Looper.getMainLooper()); long captionMismatchSince=0; boolean hashtagRetry=false; int hashtagRetries=0; long warningUntil=0; long last=0; String lastScreen=""; int verificationAttempts=0,lastProfileCheckAttempt=0; long finalVerificationUntil=0; long verificationSentAt=-1,verificationActionAt=0,verificationStartedAt=0; int verificationStage=0; boolean profileScrolled=false; boolean readingTest=false; String lastReadCaption=""; boolean verificationMatched=false; long nextVerificationAt=0; String verificationFailure="";
  protected void onServiceConnected(){instance=this;QueueStore.init(this);h.post(tick);}
  public void onDestroy(){instance=null;h.removeCallbacks(tick);QueueStore.pause("Assistente desativado. Revise o item em andamento.");super.onDestroy();}
  public void onInterrupt(){QueueStore.pause("Assistente interrompido. Revise o item em andamento.");}
@@ -22,10 +22,10 @@ public class KwaiService extends AccessibilityService {
  Runnable tick=new Runnable(){public void run(){if(Run.active)step();else readingTest=false;h.postDelayed(this,800);}};
  void step(){if(readingTest){
  AccessibilityNodeInfo root=getRootInActiveWindow();
- if(SystemClock.uptimeMillis()-verificationStartedAt>45000){endReadingTest("Teste: não consegui ler a legenda. Confira a acessibilidade do Kwai.");return;}
+ if(SystemClock.uptimeMillis()-verificationStartedAt>46000){endReadingTest("Teste: não consegui ler a legenda. Confira a acessibilidade do Kwai.");return;}
  if(root==null||!Run.target.contentEquals(root.getPackageName()))return;
  List<AccessibilityNodeInfo> nodes=new ArrayList<>();collect(root,nodes);verifyAfterSend(root,nodes);return;
- }if(System.currentTimeMillis()-Run.started>(Run.sent?210000:90000)){if(Run.sent&&!uploadInProgressFromRoot())QueueStore.pause("Não publicado: tempo limite de confirmação. Confira o perfil antes de continuar.");else finish(Run.sent?"O Kwai ainda não terminou de enviar ou confirmar este vídeo. Confira antes de continuar.":"Tempo limite ao preparar o vídeo. Confira a tela do Kwai; nenhuma nova tentativa será feita.");return;}
+ }if(System.currentTimeMillis()-Run.started>(Run.sent?300000:90000)){if(Run.sent&&!uploadInProgressFromRoot())QueueStore.pause("Não publicado: tempo limite de confirmação. Confira o perfil antes de continuar.");else finish(Run.sent?"O Kwai ainda não terminou de enviar ou confirmar este vídeo. Confira antes de continuar.":"Tempo limite ao preparar o vídeo. Confira a tela do Kwai; nenhuma nova tentativa será feita.");return;}
  AccessibilityNodeInfo root=getRootInActiveWindow();if(root==null||!Run.target.contentEquals(root.getPackageName()))return;
  List<AccessibilityNodeInfo> nodes=new ArrayList<>();collect(root,nodes);for(AccessibilityNodeInfo n:nodes)if(label(n).contains("máximo de 5 hashtags"))onHashtagWarning();String screen="";for(AccessibilityNodeInfo n:nodes)screen+=label(n)+"|";
  if(hashtagRetry&&System.currentTimeMillis()>=warningUntil){
@@ -64,72 +64,126 @@ public class KwaiService extends AccessibilityService {
  void resetVerification(){
   verificationSentAt=Run.sentAt;verificationAttempts=0;lastProfileCheckAttempt=0;
   finalVerificationUntil=0;verificationActionAt=0;verificationStartedAt=0;
-  verificationStage=0;profileScrolled=false;
+  verificationStage=0;profileScrolled=false;nextVerificationAt=0;verificationMatched=false;verificationFailure="";
  }
  void verifyAfterSend(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes){
   if(!readingTest&&verificationSentAt!=Run.sentAt)resetVerification();
   long now=SystemClock.uptimeMillis();
-  long dueAt=Run.sentAt+60000L+verificationAttempts*30000L;
   if(verificationStage==0){
-   if(now<dueAt){Run.status="Aguardando confirmação; checagem "+(verificationAttempts+1)+"/3 no intervalo programado.";return;}
+   long dueAt=nextVerificationAt>0?nextVerificationAt:Run.sentAt+60000L;
+   if(now<dueAt){Run.status="Aguardando confirmação; próxima conferência em "+((dueAt-now+999)/1000)+" s.";return;}
    verificationAttempts++;verificationStartedAt=now;verificationStage=1;
-   verificationActionAt=0;profileScrolled=false;
+   verificationActionAt=0;profileScrolled=false;verificationMatched=false;verificationFailure="";
   }
-  // Never accept a caption from the profile grid or from the publication editor.
-  if(!readingTest&&verificationStage>=5&&!isProfileScreen(nodes)&&publishedVideoScreen(nodes)&&publishedCaptionMatches(nodes)){
-   QueueStore.success();return;
+  // Timeouts also leave the video through its top arrow before any next action.
+  if(verificationStage<6&&now-verificationStartedAt>30000){
+   verificationFailure="Não consegui expandir e ler a legenda completa.";
+   verificationStage=6;verificationActionAt=0;
   }
-  if(!readingTest&&now-verificationStartedAt>=23000){
-   verificationStage=0;
-   if(verificationAttempts>=3){QueueStore.pause("Não publicado: legenda não confirmada após três checagens. Confira o perfil antes de continuar.");return;}
-   Run.status="Não confirmei a legenda. Nova checagem no próximo intervalo de 30 segundos.";
-   return;
+  if(now-verificationActionAt<1600)return;
+  if(verificationStage==6){
+   if(isProfileScreen(nodes)||homeScreen(nodes)&&!publishedVideoScreen(nodes)){
+    verificationStage=7;
+   }else{
+    if(now-verificationStartedAt>42000){
+     if(readingTest)endReadingTest("Teste interrompido: não consegui voltar pela seta. "+verificationFailure);
+     else QueueStore.pause("Não consegui voltar ao perfil. Confira a tela antes de continuar.");
+     return;
+    }
+    clickVideoBack(root,nodes);verificationActionAt=now;Run.status="Voltando pela seta superior…";return;
+   }
   }
-  if(now-verificationActionAt<1800)return;
-  Run.status="Checagem "+verificationAttempts+"/3: abrindo o perfil e conferindo o vídeo mais recente…";
-  if(uploadInProgress(nodes))return;
+  if(verificationStage==7){
+   if(readingTest){endReadingTest(lastReadCaption.isEmpty()?"Teste: "+verificationFailure:"Legenda lida:\n"+lastReadCaption);return;}
+   if(verificationMatched){QueueStore.success();return;}
+   if(verificationAttempts>=3){QueueStore.pause("Legenda não confirmada após três conferências. Fila pausada neste vídeo.");return;}
+   nextVerificationAt=now+30000L;verificationStage=0;
+   Run.status="Voltei ao perfil. Aguardando 30 segundos para conferir novamente.";return;
+  }
+  if(uploadInProgress(nodes)){Run.status="Aguardando o envio do Kwai terminar…";return;}
   if(verificationStage==1){
    if(isProfileScreen(nodes)){verificationStage=3;verificationActionAt=now;return;}
    AccessibilityNodeInfo tab=profileButton(nodes,root);
    if(tab!=null&&verificationClick(tab)){verificationActionAt=now;return;}
-   // The recording shows an unlabeled person icon at the bottom right.
-   if(homeScreen(nodes)){tapRelative(root,0.90f,0.96f);verificationActionAt=now;return;}
+   if(homeScreen(nodes)){tapRelative(root,0.90f,0.95f);verificationActionAt=now;return;}
    performGlobalAction(GLOBAL_ACTION_BACK);verificationActionAt=now;return;
   }
   if(verificationStage==2){
    if(!isProfileScreen(nodes)){verificationStage=1;return;}
-   if(now-verificationActionAt<3000)return;
-   // Reveal the posts grid below the profile and playlists.
    android.graphics.Rect r=new android.graphics.Rect();root.getBoundsInScreen(r);
-   verificationStage=3;verificationActionAt=now;
    navigationGesture(r.centerX(),r.top+r.height()*0.82f,r.centerX(),r.top+r.height()*0.40f,450);
-   profileScrolled=true;return;
+   verificationStage=3;verificationActionAt=now;profileScrolled=true;return;
   }
   if(verificationStage==3){
    if(!isProfileScreen(nodes)){verificationStage=1;return;}
    AccessibilityNodeInfo latest=latestVideo(nodes,root);
-   if(latest!=null&&verificationClick(latest)){verificationStage=4;verificationActionAt=now;return;}
-   if(tapFirstPost(root,nodes)){verificationStage=4;verificationActionAt=now;return;}
+   if(latest!=null&&verificationClick(latest)||latest==null&&tapFirstPost(root,nodes)){
+    verificationStage=4;verificationActionAt=now;return;
+   }
    if(!profileScrolled){verificationStage=2;verificationActionAt=now;return;}
-   // Retry discovery while this attempt remains active.
-   Run.status="Checagem "+verificationAttempts+"/3: aguardando identificar a primeira miniatura dos vídeos.";
-   return;
+   Run.status="Aguardando identificar o primeiro vídeo da grade…";return;
   }
-  if(verificationStage==4){
+  if(verificationStage==4||verificationStage==5){
    if(isProfileScreen(nodes)){verificationStage=3;return;}
    if(!publishedVideoScreen(nodes))return;
-   AccessibilityNodeInfo more=exact(nodes,"mais","ver mais","more","see more");
-   if(more==null)for(AccessibilityNodeInfo n:nodes){String t=label(n);if(n.isVisibleToUser()&&(t.endsWith(" mais")||t.endsWith("...mais")||t.endsWith("…mais"))){more=n;break;}}
-   if(more!=null){if(verificationClick(more)){verificationStage=5;verificationActionAt=now;}return;}
-   if(exact(nodes,"ocultar","menos","hide")!=null){verificationStage=5;verificationActionAt=now;return;}
-   // A short caption can already be fully visible.
-   if(publishedCaptionMatches(nodes)||readingTest){verificationStage=5;verificationActionAt=now;return;}
-   Run.status="Aguardando o botão Mais da legenda…";
-  }
-  if(verificationStage==5&&readingTest&&publishedVideoScreen(nodes)){
+   AccessibilityNodeInfo more=captionMore(nodes,root);
+   if(more!=null){
+    tapCaptionMore(more,root);verificationStage=5;verificationActionAt=now;
+    Run.status="Tocando em Mais; aguardando a legenda expandir…";return;
+   }
+   // A dispatched tap is not proof: require Ocultar or an exact complete caption.
+   boolean expanded=exact(nodes,"ocultar","menos","hide","see less")!=null;
+   boolean matches=publishedCaptionMatches(nodes);
+   if(!expanded&&!matches&&verificationStage==4){
+    // Some Kwai versions draw Mais without exposing a separate accessibility node.
+    android.graphics.Rect w=new android.graphics.Rect();root.getBoundsInScreen(w);
+    float y=w.top+w.height()*0.81f;
+    for(AccessibilityNodeInfo n:nodes){if(!n.isVisibleToUser())continue;
+     if(label(n).matches("[0-9]{4}-[0-9]{2}-[0-9]{2}.*")){
+      android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);
+      if(b.top>w.top+w.height()*0.65)y=b.top-w.height()*0.025f;
+     }
+    }
+    float x=w.left+w.width()*0.75f;
+    navigationGesture(x,y,x,y,80);verificationStage=5;verificationActionAt=now;
+    Run.status="Tocando na posição de Mais da gravação; aguardando expandir…";return;
+   }
+   if(!expanded&&!matches){Run.status="Aguardando confirmar a legenda inteira; ainda não li o texto.";return;}
    String text=readCaption(nodes,root);
-   if(!text.isEmpty()){lastReadCaption=text;endReadingTest("Legenda lida:\n"+text);}
+   if(text.isEmpty()){Run.status="Legenda expandida; aguardando o texto acessível…";return;}
+   lastReadCaption=text;verificationMatched=matches;
+   verificationFailure=matches?"":"A legenda lida é diferente da legenda do TXT.";
+   verificationStage=6;verificationActionAt=0;return;
   }
+ }
+ AccessibilityNodeInfo captionMore(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){
+  android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);
+  AccessibilityNodeInfo best=null;int area=Integer.MAX_VALUE;
+  for(AccessibilityNodeInfo n:nodes){
+   if(!n.isVisibleToUser()||!n.isEnabled())continue;
+   String t=label(n);if(!(t.equals("mais")||t.equals("ver mais")||t.equals("more")||t.equals("see more")||t.matches("(?s).*?(?:[.]{3}|…|\\s)mais$")))continue;
+   android.graphics.Rect r=new android.graphics.Rect();n.getBoundsInScreen(r);
+   if(r.isEmpty()||r.top<win.top+win.height()*0.50||r.bottom>win.top+win.height()*0.90)continue;
+   int size=r.width()*r.height();if(size<area){area=size;best=n;}
+  }return best;
+ }
+ boolean tapCaptionMore(AccessibilityNodeInfo n,AccessibilityNodeInfo root){
+  android.graphics.Rect r=new android.graphics.Rect();n.getBoundsInScreen(r);
+  // Tap the end of the caption line itself, never its clickable video ancestor.
+  String t=label(n);float x=r.centerX(),y=r.centerY();
+  if(t.length()>12){x=r.right-Math.min(r.width()*0.10f,24);y=r.bottom-Math.min(r.height()*0.25f,18);}
+  return navigationGesture(x,y,x,y,80);
+ }
+ void clickVideoBack(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes){
+  android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);
+  for(AccessibilityNodeInfo n:nodes){String t=normalizeStatus(label(n));
+   android.graphics.Rect r=new android.graphics.Rect();n.getBoundsInScreen(r);
+   if(n.isVisibleToUser()&&(t.equals("voltar")||t.equals("back")||t.equals("navigate up"))&&r.centerX()<win.left+win.width()*0.25&&r.centerY()<win.top+win.height()*0.18){
+    navigationGesture(r.centerX(),r.centerY(),r.centerX(),r.centerY(),80);return;
+   }
+  }
+  // Top-left arrow shown in the supplied recording (not Android's bottom Back).
+  tapRelative(root,0.075f,0.065f);
  }
  void startReadingTest(String target){
   readingTest=true;Run.target=target;Run.active=true;lastReadCaption="";
@@ -157,19 +211,20 @@ public class KwaiService extends AccessibilityService {
   android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);
   ArrayList<AccessibilityNodeInfo> parts=new ArrayList<>();
   for(AccessibilityNodeInfo n:nodes){
-   if(!n.isVisibleToUser()||n.isEditable()||n.getText()==null||n.getText().length()==0)continue;
+   if(!n.isVisibleToUser()||n.isEditable()||(n.getText()==null&&n.getContentDescription()==null))continue;
    android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);
-   String t=normalizeStatus(n.getText().toString());
+   String raw=n.getText()!=null?n.getText().toString():n.getContentDescription().toString();
+   String t=normalizeStatus(raw);
    if(b.left>win.left+win.width()*0.25||b.top<win.top+win.height()*0.52||b.bottom>win.top+win.height()*0.87)continue;
    if(t.equals("mais")||t.equals("ocultar")||t.equals("ver mais")||t.contains("curtidas que recebeu")||t.matches("[0-9 ].*")||t.contains("analise de trabalhos"))continue;
    // Caption is below the account name; prefer exact expected text or descriptive prose/hashtags.
-   String text=n.getText().toString().trim();
+   String text=raw.trim();
    if(!sameCaption(text)&&!text.contains("#")&&text.length()<45)continue;
    parts.add(n);
   }
   parts.sort((a,b)->{android.graphics.Rect x=new android.graphics.Rect(),y=new android.graphics.Rect();a.getBoundsInScreen(x);b.getBoundsInScreen(y);return x.top!=y.top?Integer.compare(x.top,y.top):Integer.compare(x.left,y.left);});
   StringBuilder out=new StringBuilder();HashSet<String> seen=new HashSet<>();
-  for(AccessibilityNodeInfo n:parts){String t=n.getText().toString().trim();if(seen.add(t)){if(out.length()>0)out.append("\n");out.append(t);}}
+  for(AccessibilityNodeInfo n:parts){String t=(n.getText()!=null?n.getText():n.getContentDescription()).toString().trim();if(seen.add(t)){if(out.length()>0)out.append("\n");out.append(t);}}
   return out.toString();
  }
  boolean homeScreen(List<AccessibilityNodeInfo> nodes){
