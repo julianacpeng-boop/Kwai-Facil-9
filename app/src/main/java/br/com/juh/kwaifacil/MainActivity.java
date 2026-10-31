@@ -167,6 +167,12 @@ public class MainActivity extends Activity {
         simulate.setContentDescription("Simular leitura do vídeo mais recente, sem publicar");
         card.addView(simulate, new LinearLayout.LayoutParams(-1, -2));
 
+        TextView diagnostic = label("Diagnóstico da tela", 12, MUTED, false);
+        diagnostic.setGravity(Gravity.END);
+        diagnostic.setPadding(dp(8), dp(12), dp(8), dp(12));
+        diagnostic.setOnClickListener(v -> diagnosticMenu());
+        card.addView(diagnostic, new LinearLayout.LayoutParams(-1, -2));
+
         status = label("Pronto para organizar sua fila.", 14, INK, false);
         status.setPadding(dp(13), dp(11), dp(13), dp(11));
         status.setBackground(background(0xFFFFF8EF, LINE, 12));
@@ -251,8 +257,56 @@ public class MainActivity extends Activity {
         d.show();
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        if(getSharedPreferences("diagnostic",0).getBoolean("show",false)) {
+            getSharedPreferences("diagnostic",0).edit().putBoolean("show",false).apply();
+            h.post(() -> showDiagnostic());
+        }
+    }
+
+    void diagnosticMenu() {
+        new AlertDialog.Builder(this).setTitle("Diagnóstico da tela")
+            .setItems(new String[]{"Capturar ANTES de tocar em Mais", "Capturar DEPOIS de tocar em Mais", "Ver / copiar relatórios"}, (d,which) -> {
+                if(which==2){showDiagnostic();return;}
+                KwaiService service=KwaiService.instance;
+                if(service==null){toast("Ative a acessibilidade primeiro.");return;}
+                if(Run.active||QueueStore.running){toast("Pause a fila e a simulação antes do diagnóstico.");return;}
+                if(service.diagnosticPending){toast("Já existe uma captura aguardando.");return;}
+                final String phase=which==0?"ANTES":"DEPOIS";
+                new AlertDialog.Builder(this).setTitle("Capturar "+phase)
+                    .setMessage("Ao iniciar, você terá 10 segundos para abrir o vídeo no Kwai. "+
+                        (which==0?"Deixe a legenda cortada, com Mais aparecendo.":"Toque manualmente em Mais e deixe a legenda inteira aberta.")+
+                        " Não haverá cliques automáticos. O relatório inclui os textos dessa tela e só é compartilhado quando você escolher.")
+                    .setPositiveButton("Iniciar 10 segundos", (a,w) -> {
+                        service.scheduleDiagnostic(phase);
+                        moveTaskToBack(true);
+                    }).setNegativeButton("Cancelar",null).show();
+            }).setNegativeButton("Fechar",null).show();
+    }
+
+    void showDiagnostic() {
+        android.content.SharedPreferences prefs=getSharedPreferences("diagnostic",0);
+        String before=prefs.getString("ANTES","");
+        String after=prefs.getString("DEPOIS","");
+        String error=prefs.getString("error","");
+        final String report=(before+"\n\n"+after).trim();
+        if(report.isEmpty()){new AlertDialog.Builder(this).setTitle("Diagnóstico").setMessage(error.isEmpty()?"Nenhum relatório capturado. Use as opções Antes e Depois.":error).setPositiveButton("Fechar",null).show();return;}
+        TextView text=label((error.isEmpty()?"":error+"\n\n")+report,12,INK,false);
+        text.setTextIsSelectable(true);
+        text.setPadding(dp(14),dp(12),dp(14),dp(12));
+        ScrollView scroll=new ScrollView(this);scroll.addView(text);
+        new AlertDialog.Builder(this).setTitle("Relatório: Antes / Depois").setView(scroll)
+            .setPositiveButton("Copiar", (d,w) -> {
+                ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Diagnóstico Kwai",report));toast("Relatório copiado.");
+            }).setNeutralButton("Compartilhar", (d,w) -> {
+                Intent send=new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,report);
+                startActivity(Intent.createChooser(send,"Compartilhar diagnóstico"));
+            }).setNegativeButton("Fechar",null).show();
+    }
+
     void testLastVideo() {
-        if (QueueStore.running || Run.active) { toast("Pause a fila antes do teste."); return; }
+        if (QueueStore.running || Run.active || (KwaiService.instance != null && KwaiService.instance.diagnosticPending)) { toast("Pause a fila ou aguarde o diagnóstico antes do teste."); return; }
         if (KwaiService.instance == null) { toast("Ative a acessibilidade primeiro."); return; }
         ArrayList<String> packages = new ArrayList<>();
         ArrayList<String> names = new ArrayList<>();
@@ -276,6 +330,7 @@ public class MainActivity extends Activity {
     }
 
     void begin() {
+        if (KwaiService.instance != null && KwaiService.instance.diagnosticPending) { toast("Aguarde o diagnóstico terminar."); return; }
         if (QueueStore.importing) { toast("Aguarde a leitura da pasta."); return; }
         if (QueueStore.running) { toast("Fila já está em andamento."); return; }
         if (KwaiService.instance == null) { toast("Ative a acessibilidade primeiro."); return; }

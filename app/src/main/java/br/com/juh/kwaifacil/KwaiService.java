@@ -2,6 +2,50 @@ package br.com.juh.kwaifacil;
 import android.accessibilityservice.AccessibilityService; import android.view.accessibility.*; import android.os.*; import android.widget.Toast; import java.util.*;
 public class KwaiService extends AccessibilityService {
  static KwaiService instance; Handler h=new Handler(Looper.getMainLooper()); long captionMismatchSince=0; boolean hashtagRetry=false; int hashtagRetries=0; long warningUntil=0; long last=0; String lastScreen=""; int verificationAttempts=0,lastProfileCheckAttempt=0; long finalVerificationUntil=0; long verificationSentAt=-1,verificationActionAt=0,verificationStartedAt=0; int verificationStage=0; boolean profileScrolled=false; boolean readingTest=false; String lastReadCaption=""; boolean verificationMatched=false; long nextVerificationAt=0; String verificationFailure="";
+ boolean diagnosticPending=false;
+ void scheduleDiagnostic(String phase){
+  if(diagnosticPending||Run.active||QueueStore.running)return;
+  diagnosticPending=true;
+  Toast.makeText(this,"Diagnóstico em 10 segundos. Abra o vídeo no Kwai e deixe a tela parada.",Toast.LENGTH_LONG).show();
+  h.postDelayed(()->captureDiagnostic(phase),10000);
+ }
+ void captureDiagnostic(String phase){
+  diagnosticPending=false;
+  AccessibilityNodeInfo root=getRootInActiveWindow();
+  String pkg=root==null||root.getPackageName()==null?"":root.getPackageName().toString();
+  if(!pkg.equals("com.kwai.video")&&!pkg.equals("com.smile.gifmaker")){
+   getSharedPreferences("diagnostic",0).edit().putString("error","Não capturei: o Kwai não estava na frente. Tente novamente e abra o vídeo durante os 10 segundos.").putBoolean("show",true).commit();
+  }else{
+   StringBuilder out=new StringBuilder();
+   android.util.DisplayMetrics metrics=new android.util.DisplayMetrics();
+   ((android.view.WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(metrics);
+   out.append("KWAI FÁCIL — DIAGNÓSTICO DE ACESSIBILIDADE\nEtapa: ").append(phase)
+      .append("\nData: ").append(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z",Locale.ROOT).format(new Date()))
+      .append("\nPacote: ").append(pkg).append("\nTela física: ").append(metrics.widthPixels).append("x").append(metrics.heightPixels)
+      .append("\nFormato: índice, pai, classe, id, limites, visível, habilitado, clicável, ações, texto e descrição.\n");
+   int[] counter={0};dumpDiagnostic(root,out,counter,-1,0);
+   if(counter[0]>=1500)out.append("\n[RELATÓRIO LIMITADO A 1500 ELEMENTOS]\n");
+   getSharedPreferences("diagnostic",0).edit().putString(phase,out.toString()).putString("latest",phase).remove("error").putBoolean("show",true).commit();
+  }
+  android.content.Intent i=new android.content.Intent(this,MainActivity.class).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK|android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);startActivity(i);
+ }
+ void dumpDiagnostic(AccessibilityNodeInfo n,StringBuilder out,int[] count,int parent,int depth){
+  if(n==null)return;
+  if(count[0]>=1500||depth>60){out.append("\n[LIMITE DO RELATÓRIO ATINGIDO]\n");return;}
+  int index=count[0]++;
+  android.graphics.Rect r=new android.graphics.Rect();n.getBoundsInScreen(r);
+  out.append("\n#").append(index).append(" pai=").append(parent).append(" classe=").append(n.getClassName())
+   .append(" id=").append(n.getViewIdResourceName()).append(" limites=").append(r.toShortString())
+   .append(" visível=").append(n.isVisibleToUser()).append(" habilitado=").append(n.isEnabled())
+   .append(" clicável=").append(n.isClickable()).append(" selecionado=").append(n.isSelected())
+   .append(" ações=").append(n.getActionList()).append("\ntexto=").append(diagnosticText(n.getText()))
+   .append("\ndescrição=").append(diagnosticText(n.getContentDescription())).append("\n");
+  for(int k=0;k<n.getChildCount()&&count[0]<1500;k++){
+   AccessibilityNodeInfo child=n.getChild(k);if(child==null)continue;
+   try{dumpDiagnostic(child,out,count,index,depth+1);}finally{child.recycle();}
+  }
+ }
+ String diagnosticText(CharSequence text){return text==null?"<vazio>":text.toString().replace("\n","\\n");}
  protected void onServiceConnected(){instance=this;QueueStore.init(this);h.post(tick);}
  public void onDestroy(){instance=null;h.removeCallbacks(tick);QueueStore.pause("Assistente desativado. Revise o item em andamento.");super.onDestroy();}
  public void onInterrupt(){QueueStore.pause("Assistente interrompido. Revise o item em andamento.");}
