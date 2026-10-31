@@ -172,17 +172,13 @@ public class KwaiService extends AccessibilityService {
    if(!publishedVideoScreen(nodes))return;
    AccessibilityNodeInfo more=captionMore(nodes,root);
    if(more!=null){
-    tapCaptionMore(more,root);verificationStage=5;verificationActionAt=now;
+    if(tapCaptionMore(more,root)){verificationStage=5;verificationActionAt=now;}
     Run.status="Tocando em Mais; aguardando a legenda expandir…";return;
    }
    // A dispatched tap is not proof: require Ocultar or an exact complete caption.
-   boolean expanded=exact(nodes,"ocultar","menos","hide","see less")!=null;
+   AccessibilityNodeInfo toggle=videoNode(nodes,"slide_play_tv_user_info_desc_more_hide");
+   boolean expanded=toggle!=null&&normalizeStatus(label(toggle)).equals("ocultar");
    boolean matches=publishedCaptionMatches(nodes);
-   if(!expanded&&!matches&&verificationStage==4){
-    // Some Kwai versions draw Mais without exposing a separate accessibility node.
-    tapRecordedCaptionMore(root,nodes);verificationStage=5;verificationActionAt=now;
-    Run.status="Tocando na posição de Mais da gravação; aguardando expandir…";return;
-   }
    if(!expanded&&!matches){Run.status="Aguardando confirmar a legenda inteira; ainda não li o texto.";return;}
    String text=readCaption(nodes,root);
    if(text.isEmpty()){Run.status="Legenda expandida; aguardando o texto acessível…";return;}
@@ -191,51 +187,31 @@ public class KwaiService extends AccessibilityService {
    verificationStage=6;verificationActionAt=0;return;
   }
  }
- AccessibilityNodeInfo captionMore(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){
-  android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);
-  AccessibilityNodeInfo best=null;int area=Integer.MAX_VALUE;
+ AccessibilityNodeInfo videoNode(List<AccessibilityNodeInfo> nodes,String name){
+  String wanted="com.kwai.video.basis:id/"+name;
   for(AccessibilityNodeInfo n:nodes){
-   if(!n.isVisibleToUser()||!n.isEnabled())continue;
-   String t=label(n);if(!(t.equals("mais")||t.equals("ver mais")||t.equals("more")||t.equals("see more")||t.matches("(?s).*?(?:[.]{3}|…|\\s)mais$")))continue;
-   android.graphics.Rect r=new android.graphics.Rect();n.getBoundsInScreen(r);
-   if(r.isEmpty()||r.top<win.top+win.height()*0.50||r.bottom>win.top+win.height()*0.90)continue;
-   int size=r.width()*r.height();if(size<area){area=size;best=n;}
-  }return best;
+   if(!n.isVisibleToUser()||!n.isEnabled()||!wanted.equals(n.getViewIdResourceName()))continue;
+   android.graphics.Rect bounds=new android.graphics.Rect();n.getBoundsInScreen(bounds);
+   if(!bounds.isEmpty())return n;
+  }return null;
+ }
+ AccessibilityNodeInfo captionMore(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){
+  AccessibilityNodeInfo n=videoNode(nodes,"slide_play_tv_user_info_desc_more_hide");
+  return n!=null&&normalizeStatus(label(n)).equals("mais")?n:null;
+ }
+ boolean clickExactVideoNode(AccessibilityNodeInfo n){
+  if(n==null)return false;
+  // Never climb to a clickable parent: that can select the player or playlist.
+  if(n.isClickable()&&n.performAction(AccessibilityNodeInfo.ACTION_CLICK))return true;
+  android.graphics.Rect bounds=new android.graphics.Rect();n.getBoundsInScreen(bounds);
+  if(bounds.isEmpty())return false;
+  return navigationGesture(bounds.centerX(),bounds.centerY(),bounds.centerX(),bounds.centerY(),90);
  }
  boolean tapCaptionMore(AccessibilityNodeInfo n,AccessibilityNodeInfo root){
-  String t=label(n);
-  android.graphics.Rect r=new android.graphics.Rect();n.getBoundsInScreen(r);
-  if(t.equals("mais")||t.equals("ver mais")||t.equals("more")||t.equals("see more")){
-   // Only this exact button may receive ACTION_CLICK: never climb to the video.
-   if(n.isClickable()&&n.performAction(AccessibilityNodeInfo.ACTION_CLICK))return true;
-   if(!r.isEmpty())return navigationGesture(r.centerX(),r.centerY(),r.centerX(),r.centerY(),90);
-  }
-  List<AccessibilityNodeInfo> nodes=new ArrayList<>();collect(root,nodes);
-  return tapRecordedCaptionMore(root,nodes);
- }
- boolean tapRecordedCaptionMore(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes){
-  android.util.DisplayMetrics d=new android.util.DisplayMetrics();
-  ((android.view.WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(d);
-  // Measured center of Mais in the supplied 610 x 1356 screenshot: (454,1095).
-  // Physical screen coordinates avoid offsets from Android status/navigation bars.
-  float x=d.widthPixels*(454f/610f),y=d.heightPixels*(1095f/1356f);
-  for(AccessibilityNodeInfo n:nodes){
-   if(!n.isVisibleToUser()||!label(n).matches("[0-9]{4}-[0-9]{2}-[0-9]{2}.*"))continue;
-   android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);
-   if(b.top>d.heightPixels*0.70f&&b.top<d.heightPixels*0.90f){y=b.centerY()-d.heightPixels*(39f/1356f);break;}
-  }
-  return navigationGesture(x,y,x,y,90);
+  return clickExactVideoNode(n);
  }
  void clickVideoBack(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes){
-  android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);
-  for(AccessibilityNodeInfo n:nodes){String t=normalizeStatus(label(n));
-   android.graphics.Rect r=new android.graphics.Rect();n.getBoundsInScreen(r);
-   if(n.isVisibleToUser()&&(t.equals("voltar")||t.equals("back")||t.equals("navigate up"))&&r.centerX()<win.left+win.width()*0.25&&r.centerY()<win.top+win.height()*0.18){
-    navigationGesture(r.centerX(),r.centerY(),r.centerX(),r.centerY(),80);return;
-   }
-  }
-  // Top-left arrow shown in the supplied recording (not Android's bottom Back).
-  tapRelative(root,0.075f,0.065f);
+  clickExactVideoNode(videoNode(nodes,"inside_stream_back_btn"));
  }
  void startReadingTest(String target){
   readingTest=true;Run.target=target;Run.active=true;lastReadCaption="";
@@ -259,43 +235,22 @@ public class KwaiService extends AccessibilityService {
   return navigationGesture(x,y,x,y,80);
  }
  String readCaption(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){
-  if(root==null)return "";
-  android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);
-  ArrayList<AccessibilityNodeInfo> parts=new ArrayList<>();
-  for(AccessibilityNodeInfo n:nodes){
-   if(!n.isVisibleToUser()||n.isEditable()||(n.getText()==null&&n.getContentDescription()==null))continue;
-   android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);
-   String raw=n.getText()!=null?n.getText().toString():n.getContentDescription().toString();
-   String t=normalizeStatus(raw);
-   if(b.left>win.left+win.width()*0.25||b.top<win.top+win.height()*0.52||b.bottom>win.top+win.height()*0.87)continue;
-   if(t.equals("mais")||t.equals("ocultar")||t.equals("ver mais")||t.contains("curtidas que recebeu")||t.matches("[0-9 ].*")||t.contains("analise de trabalhos"))continue;
-   // Caption is below the account name; prefer exact expected text or descriptive prose/hashtags.
-   String text=raw.trim();
-   if(!sameCaption(text)&&!text.contains("#")&&text.length()<45)continue;
-   parts.add(n);
-  }
-  parts.sort((a,b)->{android.graphics.Rect x=new android.graphics.Rect(),y=new android.graphics.Rect();a.getBoundsInScreen(x);b.getBoundsInScreen(y);return x.top!=y.top?Integer.compare(x.top,y.top):Integer.compare(x.left,y.left);});
-  StringBuilder out=new StringBuilder();HashSet<String> seen=new HashSet<>();
-  for(AccessibilityNodeInfo n:parts){String t=(n.getText()!=null?n.getText():n.getContentDescription()).toString().trim();if(seen.add(t)){if(out.length()>0)out.append("\n");out.append(t);}}
-  return out.toString();
+  AccessibilityNodeInfo caption=videoNode(nodes,"slide_play_tv_user_info_desc");
+  return caption==null||caption.getText()==null?"":caption.getText().toString().trim();
  }
  boolean homeScreen(List<AccessibilityNodeInfo> nodes){
   return exact(nodes,"perfil","profile","início","inicio","para você","para voce")!=null;
  }
  boolean publishedVideoScreen(List<AccessibilityNodeInfo> nodes){
-  return exact(nodes,"compartilhar","compart.","comentar","comentários","comentarios","análise de trabalhos","ver curtidas que recebeu")!=null;
+  return videoNode(nodes,"inside_stream_back_btn")!=null&&videoNode(nodes,"slide_play_tv_user_info_desc")!=null||exact(nodes,"compartilhar","compart.","comentar","comentários","comentarios","análise de trabalhos","ver curtidas que recebeu")!=null;
  }
  boolean publishedCaptionMatches(List<AccessibilityNodeInfo> nodes){
-  String expected=normalizedCaption(Run.caption).toLowerCase(Locale.ROOT);
-  if(expected.length()<8)return false;
-  for(AccessibilityNodeInfo n:nodes){
-   if(!n.isVisibleToUser()||n.isEditable())continue;
-   String value=normalizedCaption(n.getText()).toLowerCase(Locale.ROOT);
-   String description=normalizedCaption(n.getContentDescription()).toLowerCase(Locale.ROOT);
-   if(value.equals(expected)||description.equals(expected))return true;
-  }
-  String combined=normalizedCaption(readCaption(nodes,getRootInActiveWindow())).toLowerCase(Locale.ROOT);
-  return combined.equals(expected);
+  AccessibilityNodeInfo toggle=videoNode(nodes,"slide_play_tv_user_info_desc_more_hide");
+  // While Mais is visible the caption is truncated and must never confirm a post.
+  if(toggle!=null&&normalizeStatus(label(toggle)).equals("mais"))return false;
+  String actual=normalizedCaption(readCaption(nodes,null));
+  String expected=normalizedCaption(Run.caption);
+  return !expected.isEmpty()&&expected.equals(actual);
  }
  AccessibilityNodeInfo latestVideo(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){
   android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);
