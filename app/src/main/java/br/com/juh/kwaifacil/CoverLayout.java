@@ -3,6 +3,7 @@ package br.com.juh.kwaifacil;
 import android.graphics.Bitmap;
 import android.graphics.PointF;
 import android.graphics.Rect;
+import java.text.Normalizer;
 
 final class CoverLayout {
     static final float TILT = -22f;
@@ -16,6 +17,26 @@ final class CoverLayout {
         int split = name.lastIndexOf(' ', Math.round(name.length() * .70f));
         if (split < name.length() * .4f) return name;
         return name.substring(0, split).trim() + "\n" + name.substring(split + 1).trim();
+    }
+
+    static String stickerName(String name) {
+        // The sticker can drop ordinary spaces and line breaks when it renders the text.
+        return formatName(name).replace(' ', '\u00A0').replace("\n", "\u00A0\n");
+    }
+
+    static boolean sameName(CharSequence expected, CharSequence actual) {
+        return actual != null && normalizedName(expected).equals(normalizedName(actual));
+    }
+
+    private static String normalizedName(CharSequence name) {
+        return Normalizer.normalize(name, Normalizer.Form.NFC)
+            .replaceAll("[\\s\\p{Z}]+", " ").trim();
+    }
+
+    static PointF editorCoverIcon(Rect window, Rect nextButton) {
+        float x = window.left + window.width() * .927f;
+        float y = nextButton.exactCenterY() - window.width() * 1.18f;
+        return new PointF(x, y);
     }
 
     static Selection findSelection(Bitmap screen, Rect window, Rect label) {

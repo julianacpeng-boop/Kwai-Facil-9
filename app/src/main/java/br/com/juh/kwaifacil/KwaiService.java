@@ -15,6 +15,7 @@ public class KwaiService extends AccessibilityService {
  private int captionEntryAttempts;
  private boolean captionScreenSeen;
  private int coverAdjustments;
+ private int coverOpenAttempts, coverInputAttempts;
  private boolean coverNameVerified;
  private static final int COVER_OPEN=1, COVER_TIMELINE=2, COVER_STYLE=3, COVER_CONFIRMED=4;
  private static final int COVER_INPUT=5, COVER_INPUT_CONFIRM=6, COVER_POSITION=7, COVER_CAPTURE=8;
@@ -108,10 +109,17 @@ public class KwaiService extends AccessibilityService {
  }
  captionControls|=captionField!=null&&(captionFieldScore(captionField)>=4||editorNext==null);
  int kind=ScreenKind.detect(editorNext!=null,publish!=null,trimControls,editorControls,captionControls,coverPanel(nodes,root)!=null);
- if(!Run.coverDone&&Run.coverStage>0){coverStep(root,nodes,kind==ScreenKind.CAPTION?publish:null,kind==ScreenKind.EDITOR?editorNext:null);return;}
+ if(!Run.coverDone&&(Run.coverStage>0||kind==ScreenKind.COVER)){
+  coverStep(root,nodes,kind==ScreenKind.CAPTION?publish:null,editorNext);return;
+ }
+ if(!Run.coverDone&&editorCoverControl(nodes,root)!=null){
+  coverStep(root,nodes,null,editorNext);return;
+ }
  if(kind==ScreenKind.TRIM){if(click(editorNext)){last=System.currentTimeMillis();Run.started=last;Run.status="Etapa 1: avançando do corte para a edição…";}return;}
  if(kind!=ScreenKind.CAPTION)publish=null;
- if(!Run.coverDone&&(kind==ScreenKind.EDITOR||kind==ScreenKind.CAPTION)){coverStep(root,nodes,publish,kind==ScreenKind.EDITOR?editorNext:null);return;}
+ if(!Run.coverDone&&(kind==ScreenKind.EDITOR||kind==ScreenKind.CAPTION)){
+  coverStep(root,nodes,publish,kind==ScreenKind.EDITOR?editorNext:null);return;
+ }
  if(!Run.coverDone&&editorNext!=null){Run.status="Aguardando reconhecer corte ou edição; nenhum gesto de capa foi feito.";return;}
  if(!Run.titleDone){
   if(kind==ScreenKind.EDITOR||Run.titleStage>0){titleStep(root,nodes);return;}
@@ -524,11 +532,18 @@ public class KwaiService extends AccessibilityService {
   long now=System.currentTimeMillis();
   AccessibilityNodeInfo cover=coverPanel(nodes,root);
   if(Run.coverStage==0){
-   AccessibilityNodeInfo edit=exact(nodes,"editar capa","editar capa…","editar capa...");
-   if(edit==null)edit=exact(nodes,"capa","selecionar capa","adicionar capa","cover");
-   if(edit!=null&&clickExactVideoNode(edit)||edit==null&&editorNext!=null&&tapEditorPoint(root,.927f,.374f)){
-    coverAdjustments=0;coverNameVerified=false;setCoverStage(COVER_OPEN,"Abrindo a seleção da capa…");Run.started=now;
+   coverAdjustments=0;coverNameVerified=false;coverOpenAttempts=0;coverInputAttempts=0;
+   if(cover!=null||openCover(root,nodes,publish,editorNext,false)){
+    coverOpenAttempts=1;
+    setCoverStage(COVER_OPEN,"Abrindo a seleção da capa…");Run.started=now;
    }else Run.status="Aguardando o botão de edição da capa…";
+   return;
+  }
+
+  if(Run.coverStage==COVER_OPEN&&cover==null){
+   if(now-Run.coverAction>20000){finish("Não consegui abrir Capa no Kwai. Confira a tela de edição.");return;}
+   if(coverOpenAttempts<3&&now-Run.coverAction>=coverOpenAttempts*1800L
+       &&openCover(root,nodes,publish,editorNext,true))coverOpenAttempts++;
    return;
   }
 
@@ -546,20 +561,40 @@ public class KwaiService extends AccessibilityService {
    finish("Não consegui concluir a capa. Confira o editor de capa no Kwai.");return;
   }
 
-  if(Run.coverStage==COVER_INPUT){
+  if(Run.coverStage==COVER_INPUT||Run.coverStage==COVER_INPUT_CONFIRM){
    AccessibilityNodeInfo field=coverInput(nodes);
    if(field==null)return;
-   String name=CoverLayout.formatName(Run.coverName);
-   if(!setText(field,name)){
-    copyText(name);field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+   String name=CoverLayout.stickerName(Run.coverName);
+   if(!CoverLayout.sameName(Run.coverName,field.getText())){
+    if(now-Run.coverAction<800)return;
+    if(coverInputAttempts==0){
+     field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+     setText(field,name);
+     coverInputAttempts++;
+     setCoverStage(COVER_INPUT_CONFIRM,"Conferindo os espaços no nome da novela…");
+     return;
+    }
+    if(coverInputAttempts==1){
+     setText(field,Run.coverName.replace(' ','\u00A0'));
+     coverInputAttempts++;
+     setCoverStage(COVER_INPUT_CONFIRM,"Preservando os espaços no nome da novela…");
+     return;
+    }
+    if(coverInputAttempts==2){
+     copyText(name);
+     if(isEmptyInput(field)||selectAll(field))field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+     coverInputAttempts++;
+     setCoverStage(COVER_INPUT_CONFIRM,"Conferindo o nome colado na capa…");
+     return;
+    }
+    if(coverInputAttempts==3&&now-Run.coverAction>=1600){
+     copyText(Run.coverName);
+     Run.status="Cole o nome da novela com os espaços no campo da capa.";
+     Toast.makeText(this,Run.status,Toast.LENGTH_LONG).show();
+     coverInputAttempts++;
+    }
+    return;
    }
-   setCoverStage(COVER_INPUT_CONFIRM,"Conferindo o nome da novela na capa…");
-   return;
-  }
-  if(Run.coverStage==COVER_INPUT_CONFIRM){
-   AccessibilityNodeInfo field=coverInput(nodes);
-   String expected=normalizedCaption(Run.coverName);
-   if(field==null||!expected.equals(normalizedCaption(field.getText())))return;
    coverNameVerified=true;
    AccessibilityNodeInfo done=exact(nodes,"feito","concluir","confirmar","pronto","ok","done","✓","✔");
    if(done!=null&&clickExactVideoNode(done)){
@@ -640,6 +675,59 @@ public class KwaiService extends AccessibilityService {
    setCoverStage(COVER_CONFIRMED,"Confirmando a capa…");
    gesture(x,cr.exactCenterY(),x,cr.exactCenterY(),80,()->{});
   }
+ }
+
+ AccessibilityNodeInfo editorCoverControl(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){
+  Rect window=new Rect();root.getBoundsInScreen(window);
+  for(AccessibilityNodeInfo node:nodes){
+   if(!node.isVisibleToUser()||!node.isEnabled())continue;
+   String text=label(node);
+   if(!Arrays.asList("capa","editar capa","selecionar capa","adicionar capa","cover").contains(text))continue;
+   Rect button=new Rect();node.getBoundsInScreen(button);
+   if(!button.isEmpty()&&button.centerX()>window.left+window.width()*.72f
+       &&button.centerY()>window.top+window.height()*.22f
+       &&button.centerY()<window.top+window.height()*.58f)return node;
+  }
+  return null;
+ }
+
+ boolean openCover(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes,
+                   AccessibilityNodeInfo publish,AccessibilityNodeInfo next,boolean retry){
+  if(keyboardVisible())return false;
+  Rect window=new Rect();root.getBoundsInScreen(window);
+  AccessibilityNodeInfo sideCover=editorCoverControl(nodes,root);
+  if(sideCover!=null){
+   Rect button=new Rect();sideCover.getBoundsInScreen(button);
+   if(!retry&&sideCover.isClickable()&&sideCover.performAction(AccessibilityNodeInfo.ACTION_CLICK))return true;
+   float x=window.left+window.width()*.927f;
+   float y=button.exactCenterY();
+   return navigationGesture(x,y,x,y,90);
+  }
+  if(next!=null&&exact(nodes,"texto","stickers","filtro","melhorar")!=null){
+   Rect nextBounds=new Rect();next.getBoundsInScreen(nextBounds);
+   PointF icon=CoverLayout.editorCoverIcon(window,nextBounds);
+   if(window.width()>0&&window.height()>window.width()){
+    if(!nextBounds.isEmpty()&&icon.y>window.top+window.height()*.22f
+        &&icon.y<window.top+window.height()*.58f)
+     return navigationGesture(icon.x,icon.y,icon.x,icon.y,90);
+    android.util.DisplayMetrics display=new android.util.DisplayMetrics();
+    ((android.view.WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(display);
+    float x=display.widthPixels*.927f,y=display.heightPixels*.374f;
+    return navigationGesture(x,y,x,y,90);
+   }
+  }
+  if(publish==null)return false;
+  AccessibilityNodeInfo edit=exact(nodes,"editar capa","editar capa…","editar capa...","selecionar capa","adicionar capa","capa","cover");
+  return clickExactVideoNode(edit);
+ }
+
+ boolean selectAll(AccessibilityNodeInfo field){
+  CharSequence text=field.getText();
+  if(text==null)return false;
+  Bundle selection=new Bundle();
+  selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,0);
+  selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,text.length());
+  return field.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION,selection);
  }
 
  AccessibilityNodeInfo coverInput(List<AccessibilityNodeInfo> nodes){
