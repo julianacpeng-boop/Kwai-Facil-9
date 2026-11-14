@@ -15,7 +15,7 @@ public class KwaiService extends AccessibilityService {
  private int captionEntryAttempts;
  private boolean captionScreenSeen;
  private int coverAdjustments;
- private int coverOpenAttempts, coverInputAttempts;
+ private int coverOpenAttempts;
  private boolean coverNameVerified;
  private static final int COVER_OPEN=1, COVER_TIMELINE=2, COVER_STYLE=3, COVER_CONFIRMED=4;
  private static final int COVER_INPUT=5, COVER_INPUT_CONFIRM=6, COVER_POSITION=7, COVER_CAPTURE=8;
@@ -532,7 +532,7 @@ public class KwaiService extends AccessibilityService {
   long now=System.currentTimeMillis();
   AccessibilityNodeInfo cover=coverPanel(nodes,root);
   if(Run.coverStage==0){
-   coverAdjustments=0;coverNameVerified=false;coverOpenAttempts=0;coverInputAttempts=0;
+   coverAdjustments=0;coverNameVerified=false;coverOpenAttempts=0;
    if(cover!=null||openCover(root,nodes,publish,editorNext,false)){
     coverOpenAttempts=1;
     setCoverStage(COVER_OPEN,"Abrindo a seleção da capa…");Run.started=now;
@@ -561,40 +561,20 @@ public class KwaiService extends AccessibilityService {
    finish("Não consegui concluir a capa. Confira o editor de capa no Kwai.");return;
   }
 
-  if(Run.coverStage==COVER_INPUT||Run.coverStage==COVER_INPUT_CONFIRM){
+  if(Run.coverStage==COVER_INPUT){
    AccessibilityNodeInfo field=coverInput(nodes);
    if(field==null)return;
-   String name=CoverLayout.stickerName(Run.coverName);
-   if(!CoverLayout.sameName(Run.coverName,field.getText())){
-    if(now-Run.coverAction<800)return;
-    if(coverInputAttempts==0){
-     field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-     setText(field,name);
-     coverInputAttempts++;
-     setCoverStage(COVER_INPUT_CONFIRM,"Conferindo os espaços no nome da novela…");
-     return;
-    }
-    if(coverInputAttempts==1){
-     setText(field,Run.coverName.replace(' ','\u00A0'));
-     coverInputAttempts++;
-     setCoverStage(COVER_INPUT_CONFIRM,"Preservando os espaços no nome da novela…");
-     return;
-    }
-    if(coverInputAttempts==2){
-     copyText(name);
-     if(isEmptyInput(field)||selectAll(field))field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
-     coverInputAttempts++;
-     setCoverStage(COVER_INPUT_CONFIRM,"Conferindo o nome colado na capa…");
-     return;
-    }
-    if(coverInputAttempts==3&&now-Run.coverAction>=1600){
-     copyText(Run.coverName);
-     Run.status="Cole o nome da novela com os espaços no campo da capa.";
-     Toast.makeText(this,Run.status,Toast.LENGTH_LONG).show();
-     coverInputAttempts++;
-    }
-    return;
+   String name=CoverLayout.formatName(Run.coverName);
+   if(!setText(field,name)){
+    copyText(name);field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
    }
+   setCoverStage(COVER_INPUT_CONFIRM,"Conferindo o nome da novela na capa…");
+   return;
+  }
+  if(Run.coverStage==COVER_INPUT_CONFIRM){
+   AccessibilityNodeInfo field=coverInput(nodes);
+   String expected=normalizedCaption(Run.coverName);
+   if(field==null||!expected.equals(normalizedCaption(field.getText())))return;
    coverNameVerified=true;
    AccessibilityNodeInfo done=exact(nodes,"feito","concluir","confirmar","pronto","ok","done","✓","✔");
    if(done!=null&&clickExactVideoNode(done)){
@@ -719,15 +699,6 @@ public class KwaiService extends AccessibilityService {
   if(publish==null)return false;
   AccessibilityNodeInfo edit=exact(nodes,"editar capa","editar capa…","editar capa...","selecionar capa","adicionar capa","capa","cover");
   return clickExactVideoNode(edit);
- }
-
- boolean selectAll(AccessibilityNodeInfo field){
-  CharSequence text=field.getText();
-  if(text==null)return false;
-  Bundle selection=new Bundle();
-  selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,0);
-  selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,text.length());
-  return field.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION,selection);
  }
 
  AccessibilityNodeInfo coverInput(List<AccessibilityNodeInfo> nodes){
