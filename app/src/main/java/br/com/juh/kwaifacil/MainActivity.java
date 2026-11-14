@@ -26,6 +26,8 @@ public class MainActivity extends Activity {
     LinearLayout box, list;
     TextView status;
     CheckBox automatic;
+    CheckBox coverNameEnabled;
+    EditText coverName;
     Handler h = new Handler(Looper.getMainLooper());
     String rendered = "";
     Runnable refresh;
@@ -157,6 +159,7 @@ public class MainActivity extends Activity {
         automatic.setPadding(0, dp(4), 0, dp(4));
         card.addView(automatic);
 
+        addCoverNameOptions(card);
         addButton(card, "Iniciar / continuar fila", MINT, Color.WHITE, true, () -> begin());
         addButton(card, "Pausar / parar", 0xFFFFF1E7, ORANGE_DARK, false, () -> QueueStore.pause("Fila pausada. Revise o item em andamento antes de continuar."));
 
@@ -180,6 +183,41 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, -2);
         p.bottomMargin = dp(16);
         box.addView(card, p);
+    }
+
+    private void addCoverNameOptions(LinearLayout card) {
+        SharedPreferences settings = getSharedPreferences("publication", MODE_PRIVATE);
+        coverNameEnabled = new CheckBox(this);
+        coverNameEnabled.setText("Inserir nome na capa");
+        coverNameEnabled.setTextColor(INK);
+        coverNameEnabled.setButtonTintList(android.content.res.ColorStateList.valueOf(ORANGE));
+        coverNameEnabled.setChecked(settings.getBoolean("cover_name_enabled", false));
+        card.addView(coverNameEnabled);
+
+        coverName = new EditText(this);
+        coverName.setHint("Nome da novela");
+        coverName.setTextColor(INK);
+        coverName.setHintTextColor(MUTED);
+        coverName.setInputType(android.text.InputType.TYPE_CLASS_TEXT
+            | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        coverName.setMaxLines(3);
+        coverName.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(80)});
+        coverName.setText(settings.getString("cover_name", ""));
+        coverName.setVisibility(coverNameEnabled.isChecked() ? View.VISIBLE : View.GONE);
+        card.addView(coverName, new LinearLayout.LayoutParams(-1, -2));
+
+        coverNameEnabled.setOnCheckedChangeListener((view, checked) -> {
+            coverName.setVisibility(checked ? View.VISIBLE : View.GONE);
+            settings.edit().putBoolean("cover_name_enabled", checked).apply();
+        });
+        coverName.addTextChangedListener(new android.text.TextWatcher() {
+            public void beforeTextChanged(CharSequence text, int start, int count, int after) {}
+            public void onTextChanged(CharSequence text, int start, int before, int count) {
+                settings.edit().putString("cover_name", text.toString()).apply();
+            }
+            public void afterTextChanged(android.text.Editable text) {}
+        });
     }
 
     private void addQueueCard() {
@@ -246,7 +284,12 @@ public class MainActivity extends Activity {
 
     private void review(int i) {
         QueueStore.Item x = QueueStore.items.get(i);
-        AlertDialog.Builder d = new AlertDialog.Builder(this).setTitle(x.name).setMessage(x.state + "\n\n" + x.caption).setNegativeButton("Fechar", null);
+        String caption;
+        try { caption = new CaptionSpec(x.caption).caption; }
+        catch (IllegalArgumentException e) { caption = x.caption; }
+        final String textToCopy = caption;
+        AlertDialog.Builder d = new AlertDialog.Builder(this).setTitle(x.name)
+            .setMessage(x.state + "\n\n" + x.caption).setNegativeButton("Fechar", null);
         if (!QueueStore.running && x.state.equals("Precisa de atenção")) {
             d.setPositiveButton("Conferi no perfil: publicou", (a,w) -> { x.state = "Publicado"; QueueStore.save(); })
              .setNeutralButton("Conferi: não publicou", (a,w) -> new AlertDialog.Builder(this)
@@ -254,29 +297,49 @@ public class MainActivity extends Activity {
                 .setPositiveButton("Tentar novamente", (a2,w2) -> { x.state = "Pendente"; x.confirmationRetries = 0; QueueStore.save(); })
                 .setNegativeButton("Cancelar", null).show());
         }
+        if (!textToCopy.isEmpty() && (QueueStore.running || !x.state.equals("Precisa de atenção"))) {
+            d.setNeutralButton("Copiar legenda", (a,w) -> {
+                ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE))
+                    .setPrimaryClip(ClipData.newPlainText("Legenda do Kwai", textToCopy));
+                toast("Legenda copiada.");
+            });
+        }
         d.show();
     }
 
     @Override protected void onResume() {
         super.onResume();
-        if(getSharedPreferences("diagnostic",0).getBoolean("show",false)) {
-            getSharedPreferences("diagnostic",0).edit().putBoolean("show",false).apply();
+        SharedPreferences diagnostics = getSharedPreferences("diagnostic", MODE_PRIVATE);
+        if (diagnostics.getBoolean("show", false)) {
+            diagnostics.edit().putBoolean("show", false).apply();
             h.post(() -> showDiagnostic());
+        }
+        String caption = diagnostics.getString("read_caption", "");
+        if (!caption.isEmpty()) {
+            diagnostics.edit().remove("read_caption").apply();
+            h.post(() -> new AlertDialog.Builder(this).setTitle("Legenda lida no Kwai")
+                .setMessage(caption).setPositiveButton("Copiar legenda", (dialog, which) -> {
+                    ((ClipboardManager)getSystemService(CLIPBOARD_SERVICE))
+                        .setPrimaryClip(ClipData.newPlainText("Legenda do Kwai", caption));
+                    toast("Legenda copiada.");
+                }).setNegativeButton("Fechar", null).show());
         }
     }
 
     void diagnosticMenu() {
         new AlertDialog.Builder(this).setTitle("Diagnóstico da tela")
-            .setItems(new String[]{"Capturar ANTES de tocar em Mais", "Capturar DEPOIS de tocar em Mais", "Ver / copiar relatórios"}, (d,which) -> {
-                if(which==2){showDiagnostic();return;}
+            .setItems(new String[]{"Capturar ANTES de tocar em Mais", "Capturar DEPOIS de tocar em Mais", "Capturar tela de colar legenda", "Ver / copiar relatórios"}, (d,which) -> {
+                if(which==3){showDiagnostic();return;}
                 KwaiService service=KwaiService.instance;
                 if(service==null){toast("Ative a acessibilidade primeiro.");return;}
                 if(Run.active||QueueStore.running){toast("Pause a fila e a simulação antes do diagnóstico.");return;}
                 if(service.diagnosticPending){toast("Já existe uma captura aguardando.");return;}
-                final String phase=which==0?"ANTES":"DEPOIS";
+                final String phase=which==0?"ANTES":which==1?"DEPOIS":"COLAGEM";
+                String screen=which==0?"Deixe a legenda cortada, com Mais aparecendo."
+                    :which==1?"Toque em Mais e deixe a legenda inteira aberta."
+                    :"Deixe o Kwai na tela onde você preenche a legenda antes de publicar.";
                 new AlertDialog.Builder(this).setTitle("Capturar "+phase)
-                    .setMessage("Ao iniciar, você terá 10 segundos para abrir o vídeo no Kwai. "+
-                        (which==0?"Deixe a legenda cortada, com Mais aparecendo.":"Toque manualmente em Mais e deixe a legenda inteira aberta.")+
+                    .setMessage("Ao iniciar, você terá 10 segundos. "+screen+
                         " Não haverá cliques automáticos. O relatório inclui os textos dessa tela e só é compartilhado quando você escolher.")
                     .setPositiveButton("Iniciar 10 segundos", (a,w) -> {
                         service.scheduleDiagnostic(phase);
@@ -290,13 +353,13 @@ public class MainActivity extends Activity {
         String before=prefs.getString("ANTES","");
         String after=prefs.getString("DEPOIS","");
         String error=prefs.getString("error","");
-        final String report=(before+"\n\n"+after).trim();
+        final String report=(before+"\n\n"+after+"\n\n"+prefs.getString("COLAGEM","")).trim();
         if(report.isEmpty()){new AlertDialog.Builder(this).setTitle("Diagnóstico").setMessage(error.isEmpty()?"Nenhum relatório capturado. Use as opções Antes e Depois.":error).setPositiveButton("Fechar",null).show();return;}
         TextView text=label((error.isEmpty()?"":error+"\n\n")+report,12,INK,false);
         text.setTextIsSelectable(true);
         text.setPadding(dp(14),dp(12),dp(14),dp(12));
         ScrollView scroll=new ScrollView(this);scroll.addView(text);
-        new AlertDialog.Builder(this).setTitle("Relatório: Antes / Depois").setView(scroll)
+        new AlertDialog.Builder(this).setTitle("Relatório de acessibilidade").setView(scroll)
             .setPositiveButton("Copiar", (d,w) -> {
                 ((android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("Diagnóstico Kwai",report));toast("Relatório copiado.");
             }).setNeutralButton("Compartilhar", (d,w) -> {
@@ -337,6 +400,13 @@ public class MainActivity extends Activity {
         if (QueueStore.uncertain()) { toast("Revise o item que precisa de atenção antes de continuar."); return; }
         if (QueueStore.pending() < 0) { toast("Não há vídeos pendentes com legenda."); return; }
 
+        String nameOnCover = coverNameEnabled.isChecked() ? coverName.getText().toString().trim() : "";
+        if (coverNameEnabled.isChecked() && nameOnCover.isEmpty()) {
+            coverName.setError("Digite o nome da novela.");
+            coverName.requestFocus();
+            return;
+        }
+
         Intent probe = new Intent(Intent.ACTION_SEND).setType("video/*");
         ArrayList<ResolveInfo> choices = new ArrayList<>();
         for (ResolveInfo r : getPackageManager().queryIntentActivities(probe, PackageManager.MATCH_ALL)) {
@@ -349,6 +419,7 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this).setTitle("Iniciar fila no Kwai").setItems(names, (d,i) -> {
             ResolveInfo r = choices.get(i);
             QueueStore.destination = new ComponentName(r.activityInfo.packageName, r.activityInfo.name);
+            QueueStore.coverName = nameOnCover;
             Run.auto = automatic.isChecked();
             QueueStore.running = true;
             QueueStore.launch(this);
