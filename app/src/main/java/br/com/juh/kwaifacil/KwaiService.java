@@ -1,12 +1,29 @@
 package br.com.juh.kwaifacil;
-import android.accessibilityservice.AccessibilityService; import android.view.accessibility.*; import android.os.*; import android.widget.Toast; import java.util.*;
+import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.graphics.Bitmap;
+import android.graphics.PointF;
+import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
+import android.view.Display; import android.view.accessibility.*; import android.os.*; import android.widget.Toast; import java.util.*;
 public class KwaiService extends AccessibilityService {
  static KwaiService instance; Handler h=new Handler(Looper.getMainLooper()); long captionMismatchSince=0; boolean hashtagRetry=false; int hashtagRetries=0; long warningUntil=0; long last=0; String lastScreen=""; int verificationAttempts=0,lastProfileCheckAttempt=0; long finalVerificationUntil=0; long verificationSentAt=-1,verificationActionAt=0,verificationStartedAt=0; int verificationStage=0; boolean profileScrolled=false; boolean readingTest=false; String lastReadCaption=""; boolean verificationMatched=false; long nextVerificationAt=0; String verificationFailure="";
+ private static final long FIRST_VERIFICATION_DELAY_MS = 70_000L;
+ private static final long NEXT_VERIFICATION_DELAY_MS = 30_000L;
+ private int captionEntryAttempts;
+ private boolean captionScreenSeen;
+ private int coverAdjustments;
+ private boolean coverNameVerified;
+ private static final int COVER_OPEN=1, COVER_TIMELINE=2, COVER_STYLE=3, COVER_CONFIRMED=4;
+ private static final int COVER_INPUT=5, COVER_INPUT_CONFIRM=6, COVER_POSITION=7, COVER_CAPTURE=8;
+ private static final int COVER_MANUAL=9, COVER_SAVE=10;
  boolean diagnosticPending=false;
  void scheduleDiagnostic(String phase){
   if(diagnosticPending||Run.active||QueueStore.running)return;
   diagnosticPending=true;
-  Toast.makeText(this,"Diagnóstico em 10 segundos. Abra o vídeo no Kwai e deixe a tela parada.",Toast.LENGTH_LONG).show();
+  Toast.makeText(this,"Diagnóstico em 10 segundos. Abra a tela indicada do Kwai.",Toast.LENGTH_LONG).show();
   h.postDelayed(()->captureDiagnostic(phase),10000);
  }
  void captureDiagnostic(String phase){
@@ -14,7 +31,7 @@ public class KwaiService extends AccessibilityService {
   AccessibilityNodeInfo root=getRootInActiveWindow();
   String pkg=root==null||root.getPackageName()==null?"":root.getPackageName().toString();
   if(!pkg.equals("com.kwai.video")&&!pkg.equals("com.smile.gifmaker")){
-   getSharedPreferences("diagnostic",0).edit().putString("error","Não capturei: o Kwai não estava na frente. Tente novamente e abra o vídeo durante os 10 segundos.").putBoolean("show",true).commit();
+   getSharedPreferences("diagnostic",0).edit().putString("error","Não capturei: o Kwai não estava na frente. Abra a tela indicada durante os 10 segundos.").putBoolean("show",true).commit();
   }else{
    StringBuilder out=new StringBuilder();
    android.util.DisplayMetrics metrics=new android.util.DisplayMetrics();
@@ -70,7 +87,7 @@ public class KwaiService extends AccessibilityService {
  if(root==null||!Run.target.contentEquals(root.getPackageName()))return;
  List<AccessibilityNodeInfo> nodes=new ArrayList<>();collect(root,nodes);verifyAfterSend(root,nodes);return;
  }if(System.currentTimeMillis()-Run.started>(Run.sent?300000:90000)){if(Run.sent&&!uploadInProgressFromRoot())QueueStore.pause("Não publicado: tempo limite de confirmação. Confira o perfil antes de continuar.");else finish(Run.sent?"O Kwai ainda não terminou de enviar ou confirmar este vídeo. Confira antes de continuar.":"Tempo limite ao preparar o vídeo. Confira a tela do Kwai; nenhuma nova tentativa será feita.");return;}
- AccessibilityNodeInfo root=getRootInActiveWindow();if(root==null||!Run.target.contentEquals(root.getPackageName()))return;
+ AccessibilityNodeInfo root=kwaiRoot();if(root==null)return;
  List<AccessibilityNodeInfo> nodes=new ArrayList<>();collect(root,nodes);for(AccessibilityNodeInfo n:nodes)if(label(n).contains("máximo de 5 hashtags"))onHashtagWarning();String screen="";for(AccessibilityNodeInfo n:nodes)screen+=label(n)+"|";
  if(hashtagRetry&&System.currentTimeMillis()>=warningUntil){
  AccessibilityNodeInfo button=publishButton(nodes,root);boolean sameCaption=false;for(AccessibilityNodeInfo n:nodes)if(n.isEditable()&&sameCaption(n.getText()))sameCaption=true;
@@ -80,7 +97,7 @@ public class KwaiService extends AccessibilityService {
  if(System.currentTimeMillis()-last<1600||System.currentTimeMillis()<warningUntil)return;
  // Não atravessa confirmação, login ou avisos de conta.
  for(AccessibilityNodeInfo n:nodes){String t=label(n);if(t.contains("verifique")||t.contains("captcha")||t.contains("fazer login")||t.contains("aceitar termos")){finish("O Kwai pede sua atenção. A execução foi interrompida.");return;}}
- List<AccessibilityNodeInfo> fields=new ArrayList<>();for(AccessibilityNodeInfo n:nodes)if(n.isEditable()&&n.isVisibleToUser())fields.add(n);
+ AccessibilityNodeInfo captionField=captionField(nodes);
  AccessibilityNodeInfo publish=publishButton(nodes,root);
  AccessibilityNodeInfo editorNext=exact(nodes,"próximo","avançar","seguinte","next");
  boolean trimControls=false,editorControls=false,captionControls=false;
@@ -89,25 +106,150 @@ public class KwaiService extends AccessibilityService {
   if(t.equals("texto")||t.equals("stickers")||t.equals("filtro")||t.equals("melhorar"))editorControls=true;
   if(t.contains("descreva sua publicação")||t.equals("adicionar local")||t.equals("configurações avançadas")||t.equals("hashtag"))captionControls=true;
  }
- if(!fields.isEmpty()&&editorNext==null)captionControls=true;
+ captionControls|=captionField!=null&&(captionFieldScore(captionField)>=4||editorNext==null);
  int kind=ScreenKind.detect(editorNext!=null,publish!=null,trimControls,editorControls,captionControls,coverPanel(nodes,root)!=null);
+ if(!Run.coverDone&&Run.coverStage>0){coverStep(root,nodes,kind==ScreenKind.CAPTION?publish:null,kind==ScreenKind.EDITOR?editorNext:null);return;}
  if(kind==ScreenKind.TRIM){if(click(editorNext)){last=System.currentTimeMillis();Run.started=last;Run.status="Etapa 1: avançando do corte para a edição…";}return;}
- if(editorNext!=null||kind!=ScreenKind.CAPTION)publish=null;
- if(!Run.coverDone&&(kind==ScreenKind.EDITOR||kind==ScreenKind.CAPTION||Run.coverStage>0)){coverStep(root,nodes,publish,kind==ScreenKind.EDITOR?editorNext:null);return;}
+ if(kind!=ScreenKind.CAPTION)publish=null;
+ if(!Run.coverDone&&(kind==ScreenKind.EDITOR||kind==ScreenKind.CAPTION)){coverStep(root,nodes,publish,kind==ScreenKind.EDITOR?editorNext:null);return;}
  if(!Run.coverDone&&editorNext!=null){Run.status="Aguardando reconhecer corte ou edição; nenhum gesto de capa foi feito.";return;}
  if(!Run.titleDone){
   if(kind==ScreenKind.EDITOR||Run.titleStage>0){titleStep(root,nodes);return;}
   if(kind==ScreenKind.CAPTION){finish("Não consegui inserir o título no vídeo. A publicação foi interrompida para revisão.");return;}
  }
- if(!Run.filled&&publish!=null&&fields.size()==1){AccessibilityNodeInfo field=fields.get(0);Bundle args=new Bundle();args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,Run.caption);if(field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,args)){Run.filled=true;last=System.currentTimeMillis();Run.status="Conferindo a legenda…";}else finish("O Kwai não permitiu preencher o campo. Cole a legenda manualmente.");return;}
- if(Run.filled){boolean verified=false;for(AccessibilityNodeInfo n:fields)if(sameCaption(n.getText()))verified=true;
- if(!verified){for(AccessibilityNodeInfo n:nodes)if(n.isVisibleToUser()&&sameCaption(n.getText())){verified=true;break;}}
- if(!verified){if(captionMismatchSince==0)captionMismatchSince=System.currentTimeMillis();Run.status="Aguardando a legenda estabilizar no Kwai…";if(System.currentTimeMillis()-captionMismatchSince>12000)finish("A legenda exibida difere do arquivo. Revise antes de publicar.");return;}captionMismatchSince=0;
- if(!Run.auto){finish("Legenda preenchida. Revise e toque em Publicar no Kwai.");return;}
- if(publish!=null){Run.sentAt=SystemClock.uptimeMillis();if(click(publish)){resetVerification();Run.sent=true;Run.started=System.currentTimeMillis();Run.status="Enviando vídeo; aguardando confirmação explícita do Kwai…";}else Run.sentAt=0;}return;}
+ if(kind==ScreenKind.CAPTION)captionScreenSeen=true;
+ if(kind==ScreenKind.CAPTION||(captionScreenSeen&&keyboardVisible())){
+  if(!prepareCaption(captionField,nodes))return;
+  if(publish==null){
+   if(keyboardVisible()){performGlobalAction(GLOBAL_ACTION_BACK);last=System.currentTimeMillis();}
+   return;
+  }
+  if(!Run.auto){finish("Legenda preenchida. Revise e toque em Publicar no Kwai.");return;}
+  Run.sentAt=SystemClock.uptimeMillis();
+  if(click(publish)){resetVerification();Run.sent=true;Run.started=System.currentTimeMillis();Run.status="Enviando vídeo; aguardando confirmação explícita do Kwai…";}
+  else Run.sentAt=0;
+  return;
+ }
  AccessibilityNodeInfo next=exact(nodes,"próximo","avançar","seguinte","next");if(next!=null&&Run.advances<3&&!screen.equals(lastScreen)){if(click(next)){Run.advances++;lastScreen=screen;last=System.currentTimeMillis();Run.status="Avançando para a legenda…";}return;}
  Run.status="Aguardando a tela de edição/legenda do Kwai. Se necessário, avance manualmente. Volte ao Kwai Fácil para parar.";
  }
+ AccessibilityNodeInfo kwaiRoot(){
+  AccessibilityNodeInfo root=getRootInActiveWindow();
+  if(root!=null&&Run.target.contentEquals(root.getPackageName()))return root;
+  if(!keyboardVisible())return null;
+  for(AccessibilityWindowInfo window:getWindows()){
+   if(window.getType()!=AccessibilityWindowInfo.TYPE_APPLICATION)continue;
+   root=window.getRoot();
+   if(root!=null&&Run.target.contentEquals(root.getPackageName()))return root;
+  }
+  return null;
+ }
+
+ boolean keyboardVisible(){
+  for(AccessibilityWindowInfo window:getWindows()){
+   if(window.getType()==AccessibilityWindowInfo.TYPE_INPUT_METHOD)return true;
+  }
+  return false;
+ }
+
+ void resetCaptionEntry(){
+  captionScreenSeen=false;
+  captionEntryAttempts=0;
+  captionMismatchSince=0;
+ }
+
+ AccessibilityNodeInfo captionField(List<AccessibilityNodeInfo> nodes){
+  AccessibilityNodeInfo best=null;
+  int bestScore=-1;
+  boolean tied=false;
+  for(AccessibilityNodeInfo node:nodes){
+   if(!node.isVisibleToUser()||!node.isEnabled()||node.isPassword())continue;
+   if(!node.isEditable()&&!node.getActionList().contains(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_TEXT))continue;
+   if(sameCaption(node.getText()))return node;
+   int score=captionFieldScore(node);
+   if(score>bestScore){best=node;bestScore=score;tied=false;}
+   else if(score==bestScore)tied=true;
+  }
+  return tied?null:best;
+ }
+
+ int captionFieldScore(AccessibilityNodeInfo node){
+  String id=String.valueOf(node.getViewIdResourceName()).toLowerCase(Locale.ROOT);
+  String hint=normalizeStatus(String.valueOf(node.getHintText()));
+  String description=normalizeStatus(String.valueOf(node.getContentDescription()));
+  String text=normalizeStatus(String.valueOf(node.getText()));
+  if(isCaptionHint(hint)||isCaptionHint(description)||isCaptionHint(text))return 8;
+  if(id.contains("caption")||id.contains("description")||id.contains("edit_desc")||id.contains("desc_edit"))return 4;
+  return node.isFocused()?1:0;
+ }
+
+ boolean isCaptionHint(String text){
+  return text.contains("descreva sua publicacao")||text.contains("descreva seu video")
+      ||text.contains("adicionar legenda")||text.contains("escreva uma legenda")
+      ||text.contains("escreva algo")||text.contains("write a caption")||text.contains("add a caption");
+ }
+
+ boolean setText(AccessibilityNodeInfo field,String value){
+  Bundle args=new Bundle();
+  args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,value);
+  return field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,args);
+ }
+
+ void copyText(String text){
+  ClipboardManager clipboard=getSystemService(ClipboardManager.class);
+  clipboard.setPrimaryClip(ClipData.newPlainText("Texto do Kwai Fácil",text));
+ }
+
+ boolean prepareCaption(AccessibilityNodeInfo field,List<AccessibilityNodeInfo> nodes){
+  if(field!=null&&sameCaption(field.getText())){
+   Run.filled=true;captionMismatchSince=0;return true;
+  }
+  if(field==null&&captionEntryAttempts>0){
+   for(AccessibilityNodeInfo node:nodes){
+    if(node.isVisibleToUser()&&sameCaption(node.getText())){
+     Run.filled=true;captionMismatchSince=0;return true;
+    }
+   }
+  }
+
+  long now=System.currentTimeMillis();
+  if(captionMismatchSince==0)captionMismatchSince=now;
+  if(now-captionMismatchSince>25000){
+   finish("Não consegui conferir a legenda. O vídeo está aberto no Kwai para revisão.");return false;
+  }
+  if(captionEntryAttempts==0&&field!=null){
+   setText(field,Run.caption);
+   captionEntryAttempts=1;last=now;Run.status="Conferindo a legenda…";return false;
+  }
+  if(captionEntryAttempts==1&&field!=null){
+   field.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+   field.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+   copyText(Run.caption);
+   captionEntryAttempts=2;last=now;Run.status="Preparando a colagem da legenda…";return false;
+  }
+  if(captionEntryAttempts==2&&field!=null){
+   if(!isEmptyInput(field)){
+    Bundle selection=new Bundle();
+    selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,0);
+    selection.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,field.getText().length());
+    if(field.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION,selection))
+     field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+   }else field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+   captionEntryAttempts=3;last=now;Run.status="Conferindo a legenda colada…";return false;
+  }
+  if(captionEntryAttempts==0&&now-captionMismatchSince>=2500){
+   copyText(Run.caption);captionEntryAttempts=3;
+  }
+  Run.status=captionEntryAttempts>=3?"Legenda copiada. Se necessário, cole no campo do Kwai para continuar."
+      :"Aguardando reconhecer o campo da legenda…";
+  return false;
+ }
+
+ boolean isEmptyInput(AccessibilityNodeInfo field){
+  return field.getText()==null||field.getText().length()==0||field.isShowingHintText()
+      ||isCaptionHint(normalizeStatus(String.valueOf(field.getText())));
+ }
+
  // O título opcional do TXT é adicionado como texto editável no Kwai antes de avançar.
  void titleStep(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes){
   long now=System.currentTimeMillis();
@@ -177,8 +319,9 @@ public class KwaiService extends AccessibilityService {
   if(!readingTest&&verificationSentAt!=Run.sentAt)resetVerification();
   long now=SystemClock.uptimeMillis();
   if(verificationStage==0){
-   long dueAt=nextVerificationAt>0?nextVerificationAt:Run.sentAt+60000L;
+   long dueAt=nextVerificationAt>0?nextVerificationAt:Run.sentAt+FIRST_VERIFICATION_DELAY_MS;
    if(now<dueAt){Run.status="Aguardando confirmação; próxima conferência em "+((dueAt-now+999)/1000)+" s.";return;}
+   if(uploadInProgress(nodes)){Run.status="Aguardando o envio do Kwai terminar…";return;}
    verificationAttempts++;verificationStartedAt=now;verificationStage=1;
    verificationActionAt=0;profileScrolled=false;verificationMatched=false;verificationFailure="";
   }
@@ -212,7 +355,7 @@ public class KwaiService extends AccessibilityService {
    if(readingTest){endReadingTest(lastReadCaption.isEmpty()?"Teste: "+verificationFailure:"Legenda lida:\n"+lastReadCaption);return;}
    if(verificationMatched){QueueStore.success();return;}
    if(verificationAttempts>=3){QueueStore.pause("Legenda não confirmada após três conferências. Fila pausada neste vídeo.");return;}
-   nextVerificationAt=now+30000L;verificationStage=0;
+   nextVerificationAt=now+NEXT_VERIFICATION_DELAY_MS;verificationStage=0;
    Run.status="Voltei ao perfil. Aguardando 30 segundos para conferir novamente.";return;
   }
   if(uploadInProgress(nodes)){Run.status="Aguardando o envio do Kwai terminar…";return;}
@@ -248,8 +391,9 @@ public class KwaiService extends AccessibilityService {
    AccessibilityNodeInfo toggle=videoNode(nodes,"slide_play_tv_user_info_desc_more_hide");
    boolean expanded=toggle!=null&&normalizeStatus(label(toggle)).equals("ocultar");
    boolean matches=publishedCaptionMatches(nodes);
-   if(!expanded&&!matches){Run.status="Aguardando confirmar a legenda inteira; ainda não li o texto.";return;}
    String text=readCaption(nodes,root);
+   boolean completeInTest=readingTest&&toggle==null&&!text.endsWith("…")&&!text.endsWith("...");
+   if(!expanded&&!matches&&!completeInTest){Run.status="Aguardando confirmar a legenda inteira; ainda não li o texto.";return;}
    if(text.isEmpty()){Run.status="Legenda expandida; aguardando o texto acessível…";return;}
    lastReadCaption=text;verificationMatched=matches;
    verificationFailure=matches?"":"A legenda lida é diferente da legenda do TXT.";
@@ -257,16 +401,24 @@ public class KwaiService extends AccessibilityService {
   }
  }
  AccessibilityNodeInfo videoNode(List<AccessibilityNodeInfo> nodes,String name){
-  String wanted="com.kwai.video.basis:id/"+name;
+  String suffix=":id/"+name;
   for(AccessibilityNodeInfo n:nodes){
-   if(!n.isVisibleToUser()||!n.isEnabled()||!wanted.equals(n.getViewIdResourceName()))continue;
+   String id=n.getViewIdResourceName();
+   if(!n.isVisibleToUser()||!n.isEnabled()||id==null||!id.endsWith(suffix))continue;
    android.graphics.Rect bounds=new android.graphics.Rect();n.getBoundsInScreen(bounds);
    if(!bounds.isEmpty())return n;
   }return null;
  }
  AccessibilityNodeInfo captionMore(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){
   AccessibilityNodeInfo n=videoNode(nodes,"slide_play_tv_user_info_desc_more_hide");
-  return n!=null&&normalizeStatus(label(n)).equals("mais")?n:null;
+  if(n!=null&&normalizeStatus(label(n)).equals("mais"))return n;
+  AccessibilityNodeInfo caption=videoNode(nodes,"slide_play_tv_user_info_desc");
+  AccessibilityNodeInfo more=exact(nodes,"mais","ver mais");
+  if(caption==null||more==null)return null;
+  Rect text=new Rect(),button=new Rect();
+  caption.getBoundsInScreen(text);more.getBoundsInScreen(button);
+  text.inset(-text.height(),-text.height());
+  return text.contains(button.centerX(),button.centerY())?more:null;
  }
  boolean clickExactVideoNode(AccessibilityNodeInfo n){
   if(n==null)return false;
@@ -280,7 +432,9 @@ public class KwaiService extends AccessibilityService {
   return clickExactVideoNode(n);
  }
  void clickVideoBack(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes){
-  clickExactVideoNode(videoNode(nodes,"inside_stream_back_btn"));
+  AccessibilityNodeInfo back=videoNode(nodes,"inside_stream_back_btn");
+  if(back==null&&publishedVideoScreen(nodes))back=exact(nodes,"voltar","back","navegar para cima");
+  clickExactVideoNode(back);
  }
  void startReadingTest(String target){
   readingTest=true;Run.target=target;Run.active=true;lastReadCaption="";
@@ -288,6 +442,8 @@ public class KwaiService extends AccessibilityService {
   verificationStartedAt=SystemClock.uptimeMillis();Run.status="Simulação sem rolagem: Perfil → vídeo mais recente → Mais…";
  }
  void endReadingTest(String result){readingTest=false;Run.active=false;Run.status=result;QueueStore.notice=result;
+  if(!lastReadCaption.isEmpty())getSharedPreferences("diagnostic",0).edit()
+      .putString("read_caption",lastReadCaption).apply();
   Toast.makeText(this,result,Toast.LENGTH_LONG).show();
   android.content.Intent i=new android.content.Intent(this,MainActivity.class).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK|android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);startActivity(i);
  }
@@ -316,7 +472,7 @@ public class KwaiService extends AccessibilityService {
  boolean publishedCaptionMatches(List<AccessibilityNodeInfo> nodes){
   AccessibilityNodeInfo toggle=videoNode(nodes,"slide_play_tv_user_info_desc_more_hide");
   // While Mais is visible the caption is truncated and must never confirm a post.
-  if(toggle!=null&&normalizeStatus(label(toggle)).equals("mais"))return false;
+  if((toggle!=null&&normalizeStatus(label(toggle)).equals("mais"))||captionMore(nodes,null)!=null)return false;
   String actual=normalizedCaption(readCaption(nodes,null));
   String expected=normalizedCaption(Run.caption);
   return !expected.isEmpty()&&expected.equals(actual);
@@ -363,53 +519,176 @@ public class KwaiService extends AccessibilityService {
  AccessibilityNodeInfo profileButton(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){android.graphics.Rect win=new android.graphics.Rect();root.getBoundsInScreen(win);for(AccessibilityNodeInfo n:nodes){String s=normalizeStatus(label(n));if(!n.isVisibleToUser()||!n.isEnabled()||!(s.equals("perfil")||s.equals("profile")||s.equals("eu")||s.equals("me")))continue;android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);if(b.centerY()>=win.top+win.height()*0.70)return n;}return null;}
  boolean profileShowsCurrentCaption(List<AccessibilityNodeInfo> nodes){if(!isProfileScreen(nodes))return false;String caption=normalizeStatus(Run.caption);if(caption.length()<8)return false;String probe=caption.substring(0,Math.min(48,caption.length()));for(AccessibilityNodeInfo n:nodes){if(!n.isVisibleToUser())continue;String s=normalizeStatus(label(n));if(s.contains(probe))return true;}return false;}
  void refreshProfile(AccessibilityNodeInfo root){android.graphics.Rect b=new android.graphics.Rect();root.getBoundsInScreen(b);if(b.width()<=0||b.height()<=0)return;float x=b.centerX(),start=b.top+b.height()*0.24f,end=b.top+b.height()*0.63f;navigationGesture(x,start,x,end,450);}
- // A faixa por gesto usa o layout vertical observado na gravação; não há precisão de quadro.
+ // A faixa por gesto usa o layout vertical do Kwai.
  void coverStep(AccessibilityNodeInfo root,List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo publish,AccessibilityNodeInfo editorNext){
- long now=System.currentTimeMillis();
- AccessibilityNodeInfo cover=coverPanel(nodes,root);
- if(Run.coverStage==0){
-  AccessibilityNodeInfo edit=exact(nodes,"editar capa","editar capa…","editar capa...");
-  if(edit==null&&editorNext!=null)edit=exact(nodes,"capa","selecionar capa","adicionar capa","cover");
-  if(edit!=null&&click(edit)){Run.coverStage=1;Run.coverAction=now;Run.started=now;Run.status="Abrindo a seleção da capa…";return;}
-  if(edit!=null){
-   android.graphics.Rect target=new android.graphics.Rect();edit.getBoundsInScreen(target);
-   if(!target.isEmpty()){Run.coverStage=1;Run.coverAction=now;Run.started=now;gesture(target.centerX(),target.centerY(),target.centerX(),target.centerY(),80,()->{});return;}
+  long now=System.currentTimeMillis();
+  AccessibilityNodeInfo cover=coverPanel(nodes,root);
+  if(Run.coverStage==0){
+   AccessibilityNodeInfo edit=exact(nodes,"editar capa","editar capa…","editar capa...");
+   if(edit==null)edit=exact(nodes,"capa","selecionar capa","adicionar capa","cover");
+   if(edit!=null&&clickExactVideoNode(edit)||edit==null&&editorNext!=null&&tapEditorPoint(root,.927f,.374f)){
+    coverAdjustments=0;coverNameVerified=false;setCoverStage(COVER_OPEN,"Abrindo a seleção da capa…");Run.started=now;
+   }else Run.status="Aguardando o botão de edição da capa…";
+   return;
   }
-  if(editorNext!=null){
-   android.graphics.Rect bounds=new android.graphics.Rect();root.getBoundsInScreen(bounds);
-   // Fallback restrito à edição com Próximo, baseado no ícone mostrado pela usuária.
-   if(bounds.width()<=0||bounds.height()<bounds.width()){finish("Não reconheci o layout de edição. Abra a capa manualmente.");return;}
-   Run.coverStage=1;Run.coverAction=now;Run.started=now;Run.status="Abrindo a capa pelo ícone de imagem +…";
-   android.util.DisplayMetrics display=new android.util.DisplayMetrics();((android.view.WindowManager)getSystemService(WINDOW_SERVICE)).getDefaultDisplay().getRealMetrics(display);
-   float x=display.widthPixels*0.927f,y=display.heightPixels*0.374f;
-   gesture(x,y,x,y,80,()->{});return;
+
+  if(Run.coverStage==COVER_CONFIRMED||Run.coverStage==COVER_MANUAL){
+   if(cover==null&&(publish!=null||editorNext!=null)){
+    if(!Run.coverName.isEmpty()&&!coverNameVerified){
+     finish("Confira se o nome da novela ficou na capa antes de publicar.");return;
+    }
+    Run.coverDone=true;Run.started=now;last=now;Run.status="Capa selecionada; preparando a legenda…";
+    return;
+   }
+   if(Run.coverStage==COVER_MANUAL)return;
   }
-  Run.status="Aguardando o botão de edição da capa…";return;
- }
- if(now-Run.coverAction>20000){finish("Não consegui concluir a capa. Confira o marcador no Kwai antes de continuar.");return;}
- if(Run.coverStage==4){if((publish!=null||editorNext!=null)&&cover==null){Run.coverDone=true;Run.started=now;last=now;Run.status="Capa selecionada; preparando a legenda…";}return;}
- if(cover==null){Run.status="Aguardando a tela Capa…";return;}
- android.graphics.Rect r=new android.graphics.Rect();root.getBoundsInScreen(r);
- android.graphics.Rect cr=new android.graphics.Rect();cover.getBoundsInScreen(cr);
- if(r.width()<=0||r.height()<r.width()||cr.centerY()<r.top+r.height()*0.85){finish("Layout da capa diferente do esperado. Selecione a capa manualmente.");return;}
- if(Run.coverStage==1){
+  if(now-Run.coverAction>20000){
+   finish("Não consegui concluir a capa. Confira o editor de capa no Kwai.");return;
+  }
+
+  if(Run.coverStage==COVER_INPUT){
+   AccessibilityNodeInfo field=coverInput(nodes);
+   if(field==null)return;
+   String name=CoverLayout.formatName(Run.coverName);
+   if(!setText(field,name)){
+    copyText(name);field.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+   }
+   setCoverStage(COVER_INPUT_CONFIRM,"Conferindo o nome da novela na capa…");
+   return;
+  }
+  if(Run.coverStage==COVER_INPUT_CONFIRM){
+   AccessibilityNodeInfo field=coverInput(nodes);
+   String expected=normalizedCaption(Run.coverName);
+   if(field==null||!expected.equals(normalizedCaption(field.getText())))return;
+   coverNameVerified=true;
+   AccessibilityNodeInfo done=exact(nodes,"feito","concluir","confirmar","pronto","ok","done","✓","✔");
+   if(done!=null&&clickExactVideoNode(done)){
+    setCoverStage(COVER_POSITION,"Posicionando o nome na capa…");return;
+   }
+   if(keyboardVisible()&&performGlobalAction(GLOBAL_ACTION_BACK)){
+    setCoverStage(COVER_POSITION,"Posicionando o nome na capa…");return;
+   }
+   if(cover!=null)setCoverStage(COVER_POSITION,"Posicionando o nome na capa…");
+   return;
+  }
+  if(cover==null)return;
+  Rect r=new Rect(),cr=new Rect();
+  root.getBoundsInScreen(r);cover.getBoundsInScreen(cr);
+  if(r.width()<=0||r.height()<r.width())return;
+
+  if(Run.coverStage==COVER_OPEN){
+   if(now-Run.coverAction<1200)return;
+   if(Run.coverSeconds<0){setCoverStage(COVER_STYLE,"Mantendo o quadro selecionado…");return;}
+   for(AccessibilityNodeInfo n:nodes){
+    AccessibilityNodeInfo.RangeInfo range=n.getRangeInfo();
+    if(range==null||!n.isVisibleToUser())continue;
+    Rect b=new Rect();n.getBoundsInScreen(b);
+    if(b.centerY()<r.top+r.height()*.78f)continue;
+    Bundle args=new Bundle();
+    args.putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE,(float)(range.getMin()+(range.getMax()-range.getMin())*Run.coverSeconds/Run.coverDuration));
+    if(n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.getId(),args)){
+     setCoverStage(COVER_STYLE,"Quadro da capa selecionado.");return;
+    }
+   }
+   float start=r.left+r.width()*.094f;
+   float end=start+r.width()*.812f*(float)(Run.coverSeconds/Run.coverDuration);
+   float y=cr.exactCenterY()-r.width()*.15f;
+   setCoverStage(COVER_TIMELINE,"Selecionando o quadro da capa…");
+   gesture(start,y,end,y,500,()->setCoverStage(COVER_STYLE,"Quadro da capa selecionado."));
+   return;
+  }
+
   if(now-Run.coverAction<1200)return;
-  // Prefere um controle de progresso acessível quando o Kwai o fornece.
-  for(AccessibilityNodeInfo n:nodes){AccessibilityNodeInfo.RangeInfo range=n.getRangeInfo();if(range==null||!n.isVisibleToUser())continue;
-   android.graphics.Rect b=new android.graphics.Rect();n.getBoundsInScreen(b);if(b.centerY()<r.top+r.height()*0.78)continue;
-   android.os.Bundle args=new android.os.Bundle();args.putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE,(float)(range.getMin()+(range.getMax()-range.getMin())*Run.coverSeconds/Run.coverDuration));
-   if(n.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.getId(),args)){Run.coverStage=3;Run.coverAction=now;return;}
+  if(Run.coverStage==COVER_STYLE){
+   if(Run.coverName.isEmpty()){setCoverStage(COVER_SAVE,"Confirmando a capa…");return;}
+   float x=r.left+r.width()*.115f,y=cr.exactCenterY()-r.width()*.315f;
+   if(navigationGesture(x,y,x,y,85))setCoverStage(COVER_INPUT,"Abrindo o primeiro estilo de letra da capa…");
+   return;
   }
-  float start=r.left+r.width()*0.094f,end=r.left+r.width()*(0.094f+0.812f*(float)(Run.coverSeconds/Run.coverDuration)),y=cr.centerY()-r.height()*0.077f;
-  Run.coverStage=2;gesture(start,y,end,y,500,()->{Run.coverStage=3;Run.coverAction=System.currentTimeMillis();});return;
+  if(Run.coverStage==COVER_POSITION){
+   if(keyboardVisible())return;
+   if(Build.VERSION.SDK_INT<30){manualCover();return;}
+   setCoverStage(COVER_CAPTURE,"Conferindo a posição e a inclinação do nome…");
+   takeScreenshot(Display.DEFAULT_DISPLAY,getMainExecutor(),new TakeScreenshotCallback(){
+    @Override public void onSuccess(ScreenshotResult result){
+     try(HardwareBuffer buffer=result.getHardwareBuffer()){
+      Bitmap hardware=Bitmap.wrapHardwareBuffer(buffer,result.getColorSpace());
+      if(hardware==null){if(coverCaptureActive())manualCover();return;}
+      Bitmap screen=hardware.copy(Bitmap.Config.ARGB_8888,false);
+      hardware.recycle();
+      if(screen==null){if(coverCaptureActive())manualCover();return;}
+      try{
+       if(coverCaptureActive())adjustCoverName(CoverLayout.findSelection(screen,r,cr),r,cr);
+      }finally{screen.recycle();}
+     }
+    }
+    @Override public void onFailure(int code){if(coverCaptureActive())manualCover();}
+   });
+   return;
+  }
+  if(Run.coverStage==COVER_SAVE){
+   for(AccessibilityNodeInfo node:nodes){
+    if(!node.isVisibleToUser()||!node.isEnabled())continue;
+    String text=label(node);
+    if(!Arrays.asList("concluir","confirmar","salvar","pronto","✓","✔").contains(text))continue;
+    Rect button=new Rect();node.getBoundsInScreen(button);
+    if(button.centerX()>r.left+r.width()*.72f&&Math.abs(button.centerY()-cr.centerY())<r.width()*.10f&&clickExactVideoNode(node)){
+     setCoverStage(COVER_CONFIRMED,"Confirmando a capa…");return;
+    }
+   }
+   float x=r.left+r.width()*.915f;
+   setCoverStage(COVER_CONFIRMED,"Confirmando a capa…");
+   gesture(x,cr.exactCenterY(),x,cr.exactCenterY(),80,()->{});
+  }
  }
- if(Run.coverStage==3&&now-Run.coverAction>1500){
-  AccessibilityNodeInfo ok=exact(nodes,"concluir","confirmar","salvar","pronto","✓");
-  Run.coverStage=4;Run.coverAction=now;
-  if(ok!=null&&click(ok))return;
-  gesture(r.left+r.width()*0.91f,cr.centerY(),r.left+r.width()*0.91f,cr.centerY(),80,()->{});
+
+ AccessibilityNodeInfo coverInput(List<AccessibilityNodeInfo> nodes){
+  AccessibilityNodeInfo field=null;
+  for(AccessibilityNodeInfo node:nodes){
+   if(!node.isVisibleToUser()||!node.isEnabled()||!node.isEditable()||node.isPassword())continue;
+   if(node.isFocused())return node;
+   if(field!=null)return null;
+   field=node;
+  }
+  return field;
  }
+
+ boolean coverCaptureActive(){return Run.active&&Run.coverStage==COVER_CAPTURE;}
+
+ void setCoverStage(int stage,String status){
+  Run.coverStage=stage;Run.coverAction=System.currentTimeMillis();Run.status=status;
  }
+
+ void manualCover(){
+  setCoverStage(COVER_MANUAL,"Confira o nome na capa. Centralize, incline para cima à direita e toque em ✓ no Kwai.");
+  Run.started=System.currentTimeMillis();
+  Toast.makeText(this,Run.status,Toast.LENGTH_LONG).show();
+ }
+
+ void adjustCoverName(CoverLayout.Selection selection,Rect window,Rect label){
+  if(selection==null||coverAdjustments>=4){manualCover();return;}
+  PointF target=CoverLayout.center(window,label);
+  float dx=target.x-selection.center.x,dy=target.y-selection.center.y;
+  float delta=CoverLayout.TILT-selection.angle;
+  if(Math.hypot(dx,dy)>window.width()*.035f){
+   coverAdjustments++;
+   gesture(selection.center.x,selection.center.y,target.x,target.y,380,
+       ()->setCoverStage(COVER_POSITION,"Conferindo a posição do nome…"));
+   return;
+  }
+  if(Math.abs(delta)<=4f){setCoverStage(COVER_SAVE,"Nome da novela aplicado na capa.");return;}
+  coverAdjustments++;
+  float x=selection.rotate.x-selection.center.x,y=selection.rotate.y-selection.center.y;
+  android.graphics.Path path=new android.graphics.Path();
+  path.moveTo(selection.rotate.x,selection.rotate.y);
+  for(int step=1;step<=8;step++){
+   double angle=Math.toRadians(delta*step/8f);
+   path.lineTo(selection.center.x+(float)(x*Math.cos(angle)-y*Math.sin(angle)),
+       selection.center.y+(float)(x*Math.sin(angle)+y*Math.cos(angle)));
+  }
+  dispatchCoverGesture(path,460,()->setCoverStage(COVER_POSITION,"Conferindo a inclinação do nome…"));
+ }
+
  AccessibilityNodeInfo coverPanel(List<AccessibilityNodeInfo> nodes,AccessibilityNodeInfo root){
  android.graphics.Rect r=new android.graphics.Rect();root.getBoundsInScreen(r);
  for(AccessibilityNodeInfo n:nodes)if(n.isVisibleToUser()&&label(n).equals("capa")){
@@ -419,9 +698,12 @@ public class KwaiService extends AccessibilityService {
  }
  void gesture(float x,float y,float ex,float ey,long duration,Runnable complete){
  android.graphics.Path path=new android.graphics.Path();path.moveTo(x,y);if(x!=ex||y!=ey)path.lineTo(ex,ey);
- android.accessibilityservice.GestureDescription g=new android.accessibilityservice.GestureDescription.Builder().addStroke(new android.accessibilityservice.GestureDescription.StrokeDescription(path,0,duration)).build();
- boolean accepted=dispatchGesture(g,new GestureResultCallback(){public void onCompleted(android.accessibilityservice.GestureDescription d){if(Run.active)complete.run();}public void onCancelled(android.accessibilityservice.GestureDescription d){if(Run.active)finish("Gesto da capa interrompido. Confira a capa antes de continuar.");}},null);
- if(!accepted)finish("O Android recusou o gesto da capa. Confira a acessibilidade.");
+ dispatchCoverGesture(path,duration,complete);
+ }
+ void dispatchCoverGesture(android.graphics.Path path,long duration,Runnable complete){
+ GestureDescription g=new GestureDescription.Builder().addStroke(new GestureDescription.StrokeDescription(path,0,duration)).build();
+ boolean accepted=dispatchGesture(g,new GestureResultCallback(){public void onCompleted(android.accessibilityservice.GestureDescription d){if(Run.active)complete.run();}public void onCancelled(android.accessibilityservice.GestureDescription d){if(coverCaptureActive())manualCover();else if(Run.active)finish("Gesto interrompido. Confira o Kwai antes de continuar.");}},null);
+ if(!accepted){if(coverCaptureActive())manualCover();else finish("O Android recusou o gesto. Confira a acessibilidade.");}
  }
  void finish(String s){QueueStore.pause(s);Toast.makeText(this,s,Toast.LENGTH_LONG).show();}
  void collect(AccessibilityNodeInfo n,List<AccessibilityNodeInfo> out){if(n==null||out.size()>500)return;out.add(n);for(int i=0;i<n.getChildCount();i++)collect(n.getChild(i),out);}
